@@ -78,17 +78,30 @@ func RequirePermission(perm Permission) gin.HandlerFunc {
 	}
 }
 
-// RequireOwner gates a route to the store owner (approvals, employee management,
-// settings, direct purchase/reconcile posting).
-func RequireOwner() gin.HandlerFunc {
+// RequireRole gates a route to users holding one of the given roles.
+// It is the explicit role-verification primitive: sensitive endpoints list
+// the exact roles allowed (e.g. RequireRole(RoleStoreOwner) for approvals,
+// tax overrides and direct stock postings) so a cashier/employee token can
+// never exercise owner-only powers, even if permission maps change.
+func RequireRole(roles ...Role) gin.HandlerFunc {
+	allowed := make(map[Role]bool, len(roles))
+	for _, r := range roles {
+		allowed[r] = true
+	}
 	return func(c *gin.Context) {
 		p := PrincipalFromContext(c.Request.Context())
-		if p == nil || p.Role != RoleStoreOwner {
+		if p == nil || !allowed[p.Role] {
 			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": ErrForbidden.Error()})
 			return
 		}
 		c.Next()
 	}
+}
+
+// RequireOwner gates a route to the store owner (approvals, employee management,
+// settings, direct purchase/reconcile posting).
+func RequireOwner() gin.HandlerFunc {
+	return RequireRole(RoleStoreOwner)
 }
 
 // CSRF: the session cookie is SameSite=Lax, so cross-site POSTs from another

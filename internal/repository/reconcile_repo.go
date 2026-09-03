@@ -2,7 +2,6 @@ package repository
 
 import (
 	"context"
-	"errors"
 	"sort"
 
 	"github.com/jackc/pgx/v5"
@@ -31,17 +30,17 @@ type ReconcileInput struct {
 
 func (in *ReconcileInput) validate() error {
 	if len(in.Items) == 0 {
-		return errors.New("reconciliation requires at least one item")
+		return models.NewValidationError("reconciliation requires at least one item")
 	}
 	for _, it := range in.Items {
 		if it.BatchID == "" {
-			return errors.New("item batch_id is required")
+			return models.NewValidationError("item batch_id is required")
 		}
 		if it.PhysicalCount < 0 {
-			return errors.New("physical_count must be >= 0")
+			return models.NewValidationError("physical_count must be >= 0")
 		}
 		if it.Reason == "" {
-			return errors.New("a reason is required for every adjusted batch")
+			return models.NewValidationError("a reason is required for every adjusted batch")
 		}
 	}
 	return nil
@@ -178,8 +177,8 @@ func (r *ReconcileRepo) applyReconcileCore(ctx context.Context, tx pgx.Tx, store
 		items = append(items, item)
 
 		if _, err := tx.Exec(ctx, `
-			UPDATE batches SET current_stock = $2, updated_at = now() WHERE id = $1`,
-			id, dedup[id]); err != nil {
+			UPDATE batches SET current_stock = $2, updated_at = now() WHERE id = $1 AND store_id = $3`,
+			id, dedup[id], storeID); err != nil {
 			return nil, nil, err
 		}
 	}

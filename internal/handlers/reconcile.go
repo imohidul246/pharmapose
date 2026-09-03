@@ -9,7 +9,12 @@ import (
 )
 
 // POST /api/inventory/reconcile — physical audit correction (Phase 2.4).
+// Owner-only: enforced by the router's RequireRole guard and re-asserted
+// here so the handler is safe even if the route chain is ever rewired.
 func (d Deps) reconcile(c *gin.Context) {
+	if !assertOwner(c, currentPrincipal(c)) {
+		return
+	}
 	var in repository.ReconcileInput
 	if err := c.ShouldBindJSON(&in); err != nil {
 		respondBadRequest(c, err)

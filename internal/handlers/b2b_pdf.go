@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -17,15 +18,18 @@ type PDFDeps struct {
 }
 
 // GET /api/sales/invoices/:id/pdf — B2B invoice PDF download.
+//
+// The PDF streams directly to the HTTP response writer (GenerateInvoicePDF
+// writes to the given io.Writer) so large invoices never sit fully buffered
+// in memory. Seller identity is validated BEFORE headers are sent, so a
+// store with missing GSTIN / trade name / state code gets a clean 400
+// instead of a corrupt download.
 func (d PDFDeps) generateB2BInvoicePDF(c *gin.Context) {
-	fmt.Println("inside generate b2b pdf")
 	id := c.Param("id")
 	detail, err := d.SaleRepo.GetInvoice(c.Request.Context(), storeIDFor(c), id)
 	if mapRepoError(c, err) {
 		return
 	}
-
-	fmt.Printf("store id: %v", storeIDFor(c))
 
 	// Only allow PDF for B2B invoices
 	if detail.Invoice.SaleType != "B2B" {
@@ -35,19 +39,21 @@ func (d PDFDeps) generateB2BInvoicePDF(c *gin.Context) {
 
 	// Fetch store/seller info from the real store configuration. We never
 	// hard-code a placeholder seller identity — fields are left empty and are
-	// populated only from authoritative store/GST-registration data. Empty
-	// optional fields (GSTIN/PAN) are rendered as "-" by the PDF layer.
+	// populated only from authoritative store/GST-registration data.
+	// Every access is nil-guarded: a store without a profile row or without
+	// a linked business registration yields an empty SellerInfo, which the
+	// validation below rejects with a clean error (never a nil panic).
 	seller := pdf.SellerInfo{}
 	if detail.Invoice.StoreID != nil && *detail.Invoice.StoreID != "" {
 		store, err := d.TaxRepo.GetStore(c.Request.Context(), *detail.Invoice.StoreID)
 
-		if err == nil {
+		if err == nil && store != nil {
 			seller.Name = store.Name
 			seller.Address = store.Address
 			seller.Phone = store.Phone
-			if store.GSTRegistrationID != nil {
+			if store.GSTRegistrationID != nil && *store.GSTRegistrationID != "" {
 				gr, err := d.TaxRepo.GetGSTRegistration(c.Request.Context(), *store.GSTRegistrationID)
-				if err == nil {
+				if err == nil && gr != nil {
 					if gr.GSTIN != nil {
 						seller.GSTIN = *gr.GSTIN
 					}
@@ -67,10 +73,18 @@ func (d PDFDeps) generateB2BInvoicePDF(c *gin.Context) {
 		}
 	}
 
+	// Mandatory seller metadata (GSTIN, trade name, state code) must be
+	// present before generation starts; otherwise abort with a validation
+	// error while the status line is still writable.
+	if err := seller.Validate(); err != nil {
+		respondBadRequest(c, err)
+		return
+	}
+
 	// Fetch buyer/customer info when a customer is linked to the invoice.
 	buyer := pdf.BuyerInfo{}
 	if detail.Invoice.CustomerID != nil && *detail.Invoice.CustomerID != "" {
-		if cust, err := d.CustomerRepo.GetByID(c.Request.Context(), *detail.Invoice.CustomerID); err == nil {
+		if cust, err := d.CustomerRepo.GetByID(c.Request.Context(), *detail.Invoice.CustomerID); err == nil && cust != nil {
 			buyer.Name = cust.Name
 			buyer.Phone = cust.Phone
 			if cust.GSTIN != nil {
@@ -108,7 +122,15 @@ func (d PDFDeps) generateB2BInvoicePDF(c *gin.Context) {
 	c.Header("Content-Type", "application/pdf")
 	c.Header("Content-Disposition", fmt.Sprintf("inline; filename=B2B_%s.pdf", detail.Invoice.InvoiceNo))
 
+	// Stream straight to the response writer. Validation and font loading
+	// both happen before the first byte is flushed, so a generation failure
+	// here can only be a mid-stream write error — log it instead of
+	// attempting a second status line.
 	if err := pdf.GenerateInvoicePDF(c.Writer, data); err != nil {
-		respondInternal(c, err)
+		if errors.Is(err, pdf.ErrSellerIncomplete) && !c.Writer.Written() {
+			respondBadRequest(c, err)
+			return
+		}
+		respondStreamError(c, err)
 	}
 }

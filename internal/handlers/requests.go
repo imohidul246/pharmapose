@@ -60,6 +60,9 @@ func (d *Deps) getPurchaseRequest(c *gin.Context) {
 // inward and marks the request approved, atomically.
 func (d *Deps) approvePurchaseRequest(c *gin.Context) {
 	p := currentPrincipal(c)
+	if !assertOwner(c, p) {
+		return
+	}
 	po, items, err := d.PurchaseRequestRepo.Approve(c.Request.Context(), p.StoreID, c.Param("id"), p.UserID)
 	if err != nil {
 		mapRepoError(c, err)
@@ -75,6 +78,9 @@ func (d *Deps) approvePurchaseRequest(c *gin.Context) {
 // POST /api/purchase-requests/:id/reject — owner rejects the request.
 func (d *Deps) rejectPurchaseRequest(c *gin.Context) {
 	p := currentPrincipal(c)
+	if !assertOwner(c, p) {
+		return
+	}
 	var in struct {
 		Reason string `json:"reason"`
 	}
@@ -150,6 +156,9 @@ func (d *Deps) getStockAuditRequest(c *gin.Context) {
 // (ErrStaleStock).
 func (d *Deps) approveStockAuditRequest(c *gin.Context) {
 	p := currentPrincipal(c)
+	if !assertOwner(c, p) {
+		return
+	}
 	journal, items, err := d.StockAuditRequestRepo.Approve(c.Request.Context(), p.StoreID, c.Param("id"), p.UserID)
 	if err != nil {
 		mapRepoError(c, err)
@@ -165,6 +174,9 @@ func (d *Deps) approveStockAuditRequest(c *gin.Context) {
 // POST /api/stock-audit-requests/:id/reject — owner rejects the audit.
 func (d *Deps) rejectStockAuditRequest(c *gin.Context) {
 	p := currentPrincipal(c)
+	if !assertOwner(c, p) {
+		return
+	}
 	var in struct {
 		Reason string `json:"reason"`
 	}

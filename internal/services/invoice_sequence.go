@@ -31,12 +31,29 @@ func FinancialYear(t time.Time) string {
 }
 
 // NextInvoiceNumber generates the next gapless invoice number for a store
-// within the current financial year. It uses SELECT ... FOR UPDATE to ensure
-// thread safety even under concurrent checkouts.
+// within the current financial year. It delegates to NextInvoiceNumberAt
+// with the current time; back-dated flows must call NextInvoiceNumberAt with
+// the invoice date so the number lands in the invoice's own financial year.
+//
+// Atomicity: the INSERT ... ON CONFLICT DO NOTHING plus the conditional
+// UPDATE ... RETURNING run inside the caller's transaction. Concurrent
+// checkouts serialize on the sequence row lock, so each commits with a
+// distinct last_value — duplicates are impossible. A rolled-back transaction
+// burns its number (the increment does not roll back visibly to others),
+// which is the standard, acceptable source of gaps; committed numbers are
+// strictly gapless per (store, financial year, prefix).
 //
 // Format: INV/YY-YY/NNNNN (e.g. INV/26-27/00001)
 func (s *InvoiceSequence) NextInvoiceNumber(ctx context.Context, tx pgx.Tx, storeID string, prefix string) (string, string, error) {
-	fy := FinancialYear(time.Now().UTC())
+	return s.NextInvoiceNumberAt(ctx, tx, storeID, prefix, time.Now().UTC())
+}
+
+// NextInvoiceNumberAt behaves like NextInvoiceNumber but attributes the
+// number to the financial year containing `at` (the invoice date), so
+// back-dated invoices (CheckoutAt, historical seeding) never borrow numbers
+// from the wrong financial year.
+func (s *InvoiceSequence) NextInvoiceNumberAt(ctx context.Context, tx pgx.Tx, storeID string, prefix string, at time.Time) (string, string, error) {
+	fy := FinancialYear(at)
 
 	// If no store_id, use an in-memory atomic fallback (for tests/legacy)
 	if storeID == "" {

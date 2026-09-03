@@ -235,8 +235,8 @@ func (r *CustomerRepo) RecordPayment(ctx context.Context, customerID string, amo
 		var newBalance float64
 		if err := tx.QueryRow(ctx,
 			`UPDATE customers SET current_balance = current_balance - $2, updated_at = now()
-			 WHERE id = $1 RETURNING current_balance::float8`,
-			customerID, amount).Scan(&newBalance); err != nil {
+			 WHERE id = $1 AND store_id = $3 RETURNING current_balance::float8`,
+			customerID, amount, sid).Scan(&newBalance); err != nil {
 			return err
 		}
 

@@ -29,6 +29,19 @@ func respondInternal(c *gin.Context, err error) {
 	respondError(c, http.StatusInternalServerError, "internal server error")
 }
 
+// respondStreamError handles a failure from a handler that streams its body
+// (PDF downloads). If nothing was written yet the normal 500 envelope is
+// still possible; once the status line is flushed only logging (plus abort)
+// remains — writing a second status would corrupt the stream.
+func respondStreamError(c *gin.Context, err error) {
+	log.Printf("stream error on %s %s: %v", c.Request.Method, c.Request.URL.Path, err)
+	if c.Writer.Written() {
+		c.Abort()
+		return
+	}
+	respondError(c, http.StatusInternalServerError, "internal server error")
+}
+
 func bindDateRange(c *gin.Context, defaultDays int) (time.Time, time.Time, error) {
 	now := time.Now().UTC()
 	end := now.AddDate(0, 0, 1)

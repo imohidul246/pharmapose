@@ -226,9 +226,14 @@ func (r *SaleRepo) checkout(ctx context.Context, in *CheckoutInput, when time.Ti
 
 	// The store is derived from the invoice input (validated at the handler
 	// against the authenticated principal); it scopes every tax/medicine lookup.
+	// An empty store is rejected outright so no query below can ever run
+	// unscoped across tenants (IDOR).
 	storeID := ""
 	if in.StoreID != nil {
 		storeID = *in.StoreID
+	}
+	if storeID == "" {
+		return nil, models.NewValidationError("store_id is required")
 	}
 
 	var result *CheckoutResult
@@ -239,12 +244,15 @@ func (r *SaleRepo) checkout(ctx context.Context, in *CheckoutInput, when time.Ti
 		}
 		sort.Strings(batchIDs)
 
+		// Pessimistic lock, tenant-scoped: a store can only lock (and learn
+		// about) its own batches. A batch ID from another store simply does
+		// not match and surfaces as InsufficientStockError below.
 		rows, err := tx.Query(ctx, `
 			SELECT b.id::text, b.medicine_id::text, b.sale_price::float8, b.current_stock
 			FROM batches b
-			WHERE b.id = ANY($1)
+			WHERE b.id = ANY($1) AND b.store_id = $2
 			ORDER BY b.id
-			FOR UPDATE`, batchIDs)
+			FOR UPDATE`, batchIDs, storeID)
 		if err != nil {
 			return err
 		}
@@ -287,29 +295,40 @@ func (r *SaleRepo) checkout(ctx context.Context, in *CheckoutInput, when time.Ti
 			buyerStateCode = *in.PlaceOfSupply
 		}
 
-		// Resolve the registered-buyer GSTIN so B2B invoices land in the
-		// GSTR-1 B2B section. B2B wholesale uses buyer_gstin; retail to a
-		// registered customer falls back to the customer's GSTIN.
-		var customerGSTIN *string
-		if isB2B {
-			if in.BuyerGSTIN != nil && *in.BuyerGSTIN != "" {
-				customerGSTIN = in.BuyerGSTIN
+	// Resolve the registered-buyer GSTIN so B2B invoices land in the
+	// GSTR-1 B2B section. B2B wholesale uses buyer_gstin; retail to a
+	// registered customer falls back to the customer's GSTIN.
+	// The customer lookup is tenant-scoped: a customer ID from another
+	// store resolves to "not found" rather than leaking GSTIN/state data.
+	// Any explicitly provided customer_id must belong to this store.
+	var customerGSTIN *string
+	if in.CustomerID != nil && *in.CustomerID != "" {
+		var custGSTIN *string
+		var custStateCode *string
+		err := tx.QueryRow(ctx,
+			`SELECT gstin, state_code FROM customers WHERE id = $1 AND store_id = $2`,
+			*in.CustomerID, storeID).
+			Scan(&custGSTIN, &custStateCode)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return models.ErrNotFound
+		}
+		if err != nil {
+			return err
+		}
+		if !isB2B {
+			if custGSTIN != nil && *custGSTIN != "" {
+				customerGSTIN = custGSTIN
 			}
-		} else if in.CustomerID != nil {
-			var custGSTIN *string
-			var custStateCode *string
-			err := tx.QueryRow(ctx,
-				`SELECT gstin, state_code FROM customers WHERE id = $1`, *in.CustomerID).
-				Scan(&custGSTIN, &custStateCode)
-			if err == nil {
-				if custGSTIN != nil && *custGSTIN != "" {
-					customerGSTIN = custGSTIN
-				}
-				if custStateCode != nil && buyerStateCode == "" {
-					buyerStateCode = *custStateCode
-				}
+			if custStateCode != nil && buyerStateCode == "" {
+				buyerStateCode = *custStateCode
 			}
 		}
+	}
+	if isB2B {
+		if in.BuyerGSTIN != nil && *in.BuyerGSTIN != "" {
+			customerGSTIN = in.BuyerGSTIN
+		}
+	}
 		supplyType = tax.DetermineSupplyType(sellerStateCode, buyerStateCode)
 		var customerStateCode *string
 		if buyerStateCode != "" {
@@ -442,10 +461,13 @@ func (r *SaleRepo) checkout(ctx context.Context, in *CheckoutInput, when time.Ti
 
 		var customerName string
 		if in.PaymentType == models.PaymentCredit {
+			// Serialized per-customer: the row lock held to commit below
+			// serializes concurrent credit sales against the same limit.
+			// Tenant-scoped so one store can never charge another's customer.
 			row := tx.QueryRow(ctx, `
 				SELECT name, credit_limit::float8, current_balance::float8
-				FROM customers WHERE id = $1
-				FOR UPDATE`, *in.CustomerID)
+				FROM customers WHERE id = $1 AND store_id = $2
+				FOR UPDATE`, *in.CustomerID, storeID)
 			var limit, balance float64
 			if err := row.Scan(&customerName, &limit, &balance); err != nil {
 				if errors.Is(err, pgx.ErrNoRows) {
@@ -471,7 +493,10 @@ func (r *SaleRepo) checkout(ctx context.Context, in *CheckoutInput, when time.Ti
 		if isB2B {
 			invoicePrefix = "B2B/"
 		}
-		invoiceNo, fy, err := r.seq.NextInvoiceNumber(ctx, tx, storeID, invoicePrefix)
+		// The sequence row is per (store, invoice financial year, prefix) and
+		// is incremented inside this transaction, so concurrent checkouts
+		// serialize on it and invoice numbers stay unique and gapless.
+		invoiceNo, fy, err := r.seq.NextInvoiceNumberAt(ctx, tx, storeID, invoicePrefix, invoiceDate)
 		if err != nil {
 			return fmt.Errorf("generate invoice number: %w", err)
 		}
@@ -582,12 +607,14 @@ func (r *SaleRepo) checkout(ctx context.Context, in *CheckoutInput, when time.Ti
 			}
 			li.InvoiceID = inv.ID
 
-			// Deduct quantity + bonus from stock
-			totalDeduct := li.Quantity + li.BonusQuantity
-			tag, err := tx.Exec(ctx, `
-				UPDATE batches SET current_stock = current_stock - $2, updated_at = now()
-				WHERE id = $1 AND current_stock >= $2`,
-				li.BatchID, totalDeduct)
+		// Deduct quantity + bonus from stock. The store guard re-asserts
+		// tenant isolation on the write even though the rows were locked
+		// scoped above (defense in depth: zero rows affected aborts).
+		totalDeduct := li.Quantity + li.BonusQuantity
+		tag, err := tx.Exec(ctx, `
+			UPDATE batches SET current_stock = current_stock - $2, updated_at = now()
+			WHERE id = $1 AND store_id = $3 AND current_stock >= $2`,
+			li.BatchID, totalDeduct, storeID)
 			if err != nil {
 				return err
 			}
@@ -601,8 +628,8 @@ func (r *SaleRepo) checkout(ctx context.Context, in *CheckoutInput, when time.Ti
 			var newBalance float64
 			err := tx.QueryRow(ctx, `
 				UPDATE customers SET current_balance = current_balance + $2, updated_at = now()
-				WHERE id = $1 RETURNING current_balance::float8`,
-				*in.CustomerID, chargeableTotal).Scan(&newBalance)
+				WHERE id = $1 AND store_id = $3 RETURNING current_balance::float8`,
+				*in.CustomerID, chargeableTotal, storeID).Scan(&newBalance)
 			if err != nil {
 				return err
 			}

@@ -3,6 +3,8 @@
 package pdf
 
 import (
+	_ "embed"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -14,6 +16,18 @@ import (
 
 	"github.com/mohi/pms-marg-inspired/internal/repository"
 )
+
+// The Noto Sans font files are embedded in the binary and registered
+// from memory on every generation. Embedding (instead of reading from disk
+// per request) makes the buffers application singletons: zero disk I/O and
+// zero path probing on the hot billing path, and the PDF renders identically
+// no matter which directory the server starts in.
+//
+//go:embed fonts/NotoSans-Regular.ttf
+var fontRegularTTF []byte
+
+//go:embed fonts/NotoSans-Bold.ttf
+var fontBoldTTF []byte
 
 const (
 	marginLeft   = 15.0
@@ -63,6 +77,14 @@ type InvoiceData struct {
 }
 
 func GenerateInvoicePDF(w io.Writer, data InvoiceData) error {
+	// Fail fast on missing seller identity before any layout work: a GST
+	// invoice without the seller's GSTIN / trade name / state is not a
+	// legal document, and the caller maps this to a clean 4xx (never a
+	// half-written PDF or a nil-pointer panic on absent registration data).
+	if err := data.Seller.Validate(); err != nil {
+		return err
+	}
+
 	pdf := &gopdf.GoPdf{}
 	pdf.Start(gopdf.Config{
 		PageSize: gopdf.Rect{W: pageWidth, H: 297.0}, // A4, mm
@@ -86,9 +108,44 @@ func GenerateInvoicePDF(w io.Writer, data InvoiceData) error {
 	return err
 }
 
+// ErrSellerIncomplete signals that mandatory seller metadata is missing.
+// The error message names every absent field so the caller can surface a
+// clean validation error instead of rendering "-" placeholders on a GSTIN
+// invoice or panicking on nil registration data.
+var ErrSellerIncomplete = errors.New("incomplete seller details")
+
+// Validate reports whether the seller block carries every field mandatory on
+// a GST tax invoice: the trade/store name, the GSTIN, and the state code.
+// All inputs are plain strings (never nil pointers), so a missing store
+// profile or business registration degrades to this error, not a panic.
+func (s SellerInfo) Validate() error {
+	var missing []string
+	if strings.TrimSpace(s.Name) == "" {
+		missing = append(missing, "trade name")
+	}
+	if strings.TrimSpace(s.GSTIN) == "" {
+		missing = append(missing, "GSTIN")
+	}
+	if strings.TrimSpace(s.StateCode) == "" && strings.TrimSpace(s.StateName) == "" {
+		missing = append(missing, "state code")
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("%w: missing %s — configure the store profile and business registration before generating invoices",
+			ErrSellerIncomplete, strings.Join(missing, ", "))
+	}
+	return nil
+}
+
 func loadFonts(pdf *gopdf.GoPdf) error {
-	// Resolve font files robustly regardless of the working directory (repo
-	// root for the server binary, package dir for tests).
+	// Preferred path: the embedded singleton buffers (no disk I/O). The
+	// on-disk fallback only exists for exotic builds where embed produced
+	// empty output; it probes the same candidate paths as before.
+	if len(fontRegularTTF) > 0 && len(fontBoldTTF) > 0 {
+		if err := pdf.AddTTFFontData(fontRegular, fontRegularTTF); err != nil {
+			return err
+		}
+		return pdf.AddTTFFontData(fontBold, fontBoldTTF)
+	}
 	candidates := []string{
 		"internal/pdf/fonts/NotoSans-Regular.ttf",
 		"fonts/NotoSans-Regular.ttf",

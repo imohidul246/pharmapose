@@ -48,3 +48,16 @@ func storeIDFor(c *gin.Context) string {
 func currentPrincipal(c *gin.Context) *auth.Principal {
 	return auth.PrincipalFromContext(c.Request.Context())
 }
+
+// assertOwner is a handler-level role re-check for owner-only mutations
+// (request approvals/rejections, direct reconciliations). The router already
+// gates these routes with RequireRole(RoleStoreOwner); this assertion keeps
+// the handler safe even if the route chain is ever rewired, and guarantees a
+// cashier/employee token can never approve stock audits or purchase orders.
+func assertOwner(c *gin.Context, p *auth.Principal) bool {
+	if p == nil || p.Role != auth.RoleStoreOwner {
+		respondError(c, http.StatusForbidden, auth.ErrForbidden.Error())
+		return false
+	}
+	return true
+}

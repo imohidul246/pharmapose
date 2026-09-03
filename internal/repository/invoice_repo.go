@@ -58,7 +58,7 @@ func (r *SaleRepo) ListInvoices(ctx context.Context, storeID string, start, end 
 		       si.grand_total::float8,
 		       si.tax_total::float8
 		FROM sales_invoices si
-		LEFT JOIN customers c ON c.id = si.customer_id
+		LEFT JOIN customers c ON c.id = si.customer_id AND c.store_id = si.store_id
 		LEFT JOIN sales_invoice_items sii ON sii.invoice_id = si.id
 		WHERE si.store_id = $1 AND si.invoice_date >= $2 AND si.invoice_date < $3
 		  AND ($4 = '' OR si.invoice_no LIKE '%' || $4 || '%')
@@ -107,7 +107,7 @@ func (r *SaleRepo) GetInvoice(ctx context.Context, storeID, id string) (*SalesIn
 		       si.invoice_date, si.financial_year,
 		       si.sale_type, si.buyer_name, si.buyer_gstin, si.buyer_address
 		FROM sales_invoices si
-		LEFT JOIN customers c ON c.id = si.customer_id
+		LEFT JOIN customers c ON c.id = si.customer_id AND c.store_id = si.store_id
 		WHERE si.id = $1 AND si.store_id = $2`, id, storeID).
 		Scan(&d.Invoice.ID, &d.Invoice.InvoiceNo, &customerID, &paymentType,
 			&d.Invoice.TotalAmount, &d.Invoice.DiscountTotal, &d.Invoice.CreatedAt,

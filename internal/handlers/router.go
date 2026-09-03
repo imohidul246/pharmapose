@@ -81,32 +81,37 @@ func NewRouter(d Deps) *gin.Engine {
 				store.PUT("", d.updateStore)
 			}
 
-			purchases := protected.Group("/purchases")
-			{
-				purchases.GET("", auth.RequirePermission(auth.PermPurchaseView), d.listPurchases)
-				purchases.POST("", auth.RequireOwner(), d.createPurchase)
-			}
+		purchases := protected.Group("/purchases")
+		{
+			purchases.GET("", auth.RequirePermission(auth.PermPurchaseView), d.listPurchases)
+			// Direct inward posts stock immediately: owner-only. Employees
+			// submit purchase-requests for approval instead.
+			purchases.POST("", auth.RequireRole(auth.RoleStoreOwner), d.createPurchase)
+		}
 
-			// Employee-held workflows: submit here, the owner confirms below.
-			purchaseRequests := protected.Group("/purchase-requests")
-			{
-				purchaseRequests.POST("", auth.RequirePermission(auth.PermPurchaseCreate), d.createPurchaseRequest)
-				purchaseRequests.GET("", auth.RequirePermission(auth.PermPurchaseView), d.listPurchaseRequests)
-				purchaseRequests.GET("/:id", auth.RequirePermission(auth.PermPurchaseView), d.getPurchaseRequest)
-				purchaseRequests.POST("/:id/approve", auth.RequireOwner(), d.approvePurchaseRequest)
-				purchaseRequests.POST("/:id/reject", auth.RequireOwner(), d.rejectPurchaseRequest)
-				purchaseRequests.POST("/:id/cancel", auth.RequirePermission(auth.PermPurchaseCreate), d.cancelPurchaseRequest)
-			}
+		// Employee-held workflows: submit here, the owner confirms below.
+		// The approve/reject routes carry an explicit owner-role allow-list
+		// so an employee (cashier) token can never approve a request, even
+		// if the permission map is later widened.
+		purchaseRequests := protected.Group("/purchase-requests")
+		{
+			purchaseRequests.POST("", auth.RequirePermission(auth.PermPurchaseCreate), d.createPurchaseRequest)
+			purchaseRequests.GET("", auth.RequirePermission(auth.PermPurchaseView), d.listPurchaseRequests)
+			purchaseRequests.GET("/:id", auth.RequirePermission(auth.PermPurchaseView), d.getPurchaseRequest)
+			purchaseRequests.POST("/:id/approve", auth.RequireRole(auth.RoleStoreOwner), d.approvePurchaseRequest)
+			purchaseRequests.POST("/:id/reject", auth.RequireRole(auth.RoleStoreOwner), d.rejectPurchaseRequest)
+			purchaseRequests.POST("/:id/cancel", auth.RequirePermission(auth.PermPurchaseCreate), d.cancelPurchaseRequest)
+		}
 
-			stockAuditRequests := protected.Group("/stock-audit-requests")
-			{
-				stockAuditRequests.POST("", auth.RequirePermission(auth.PermStockAuditCreate), d.createStockAuditRequest)
-				stockAuditRequests.GET("", auth.RequirePermission(auth.PermStockView), d.listStockAuditRequests)
-				stockAuditRequests.GET("/:id", auth.RequirePermission(auth.PermStockView), d.getStockAuditRequest)
-				stockAuditRequests.POST("/:id/approve", auth.RequireOwner(), d.approveStockAuditRequest)
-				stockAuditRequests.POST("/:id/reject", auth.RequireOwner(), d.rejectStockAuditRequest)
-				stockAuditRequests.POST("/:id/cancel", auth.RequirePermission(auth.PermStockAuditCreate), d.cancelStockAuditRequest)
-			}
+		stockAuditRequests := protected.Group("/stock-audit-requests")
+		{
+			stockAuditRequests.POST("", auth.RequirePermission(auth.PermStockAuditCreate), d.createStockAuditRequest)
+			stockAuditRequests.GET("", auth.RequirePermission(auth.PermStockView), d.listStockAuditRequests)
+			stockAuditRequests.GET("/:id", auth.RequirePermission(auth.PermStockView), d.getStockAuditRequest)
+			stockAuditRequests.POST("/:id/approve", auth.RequireRole(auth.RoleStoreOwner), d.approveStockAuditRequest)
+			stockAuditRequests.POST("/:id/reject", auth.RequireRole(auth.RoleStoreOwner), d.rejectStockAuditRequest)
+			stockAuditRequests.POST("/:id/cancel", auth.RequirePermission(auth.PermStockAuditCreate), d.cancelStockAuditRequest)
+		}
 
 			// Offline cache: the SPA mirrors inventory + customers into
 			// IndexedDB; these are the plumbing endpoints it calls on login.
@@ -117,49 +122,51 @@ func NewRouter(d Deps) *gin.Engine {
 				sync.GET("/tax", auth.RequirePermission(auth.PermStockView), d.getTaxConfigSync)
 			}
 
-			inv := protected.Group("/inventory")
-			{
-				inv.POST("/reconcile", auth.RequireOwner(), d.reconcile)
-				inv.GET("/reconciliations", auth.RequirePermission(auth.PermStockView), d.listReconciliations)
-			}
+		inv := protected.Group("/inventory")
+		{
+			// Direct reconciliation force-corrects live stock: owner-only.
+			inv.POST("/reconcile", auth.RequireRole(auth.RoleStoreOwner), d.reconcile)
+			inv.GET("/reconciliations", auth.RequirePermission(auth.PermStockView), d.listReconciliations)
+		}
 
-			meds := protected.Group("/medicines")
-			{
-				meds.GET("", d.listMedicines)
-				meds.POST("", d.createMedicine)
-				meds.GET("/:id", d.getMedicine)
-				meds.GET("/:id/detail", d.getMedicineDetail)
-				meds.PUT("/:id", d.updateMedicine)
-				meds.DELETE("/:id", d.deleteMedicine)
-				meds.GET("/:id/tax-config", d.getMedicineTaxConfig)
-				meds.PUT("/:id/tax-config", auth.RequireOwner(), d.upsertMedicineTaxConfig)
-			}
+		meds := protected.Group("/medicines")
+		{
+			meds.GET("", auth.RequirePermission(auth.PermStockView), d.listMedicines)
+			meds.POST("", auth.RequirePermission(auth.PermStockView), d.createMedicine)
+			meds.GET("/:id", auth.RequirePermission(auth.PermStockView), d.getMedicine)
+			meds.GET("/:id/detail", auth.RequirePermission(auth.PermStockView), d.getMedicineDetail)
+			meds.PUT("/:id", auth.RequirePermission(auth.PermStockView), d.updateMedicine)
+			meds.DELETE("/:id", auth.RequirePermission(auth.PermStockView), d.deleteMedicine)
+			meds.GET("/:id/tax-config", auth.RequirePermission(auth.PermStockView), d.getMedicineTaxConfig)
+			// Tax overrides rewrite billing for the whole store: owner-only.
+			meds.PUT("/:id/tax-config", auth.RequireRole(auth.RoleStoreOwner), d.upsertMedicineTaxConfig)
+		}
 
-			customers := protected.Group("/customers")
-			{
-				customers.GET("", d.listCustomers)
-				customers.POST("", d.createCustomer)
-				customers.GET("/:id", d.getCustomer)
-				customers.PUT("/:id", d.updateCustomer)
-				customers.GET("/:id/ledger", d.customerLedger)
-				customers.POST("/:id/payments", d.recordPayment)
-			}
+		customers := protected.Group("/customers")
+		{
+			customers.GET("", auth.RequirePermission(auth.PermCustomerView), d.listCustomers)
+			customers.POST("", auth.RequirePermission(auth.PermCustomerCreate), d.createCustomer)
+			customers.GET("/:id", auth.RequirePermission(auth.PermCustomerView), d.getCustomer)
+			customers.PUT("/:id", auth.RequirePermission(auth.PermCustomerCreate), d.updateCustomer)
+			customers.GET("/:id/ledger", auth.RequirePermission(auth.PermKhataView), d.customerLedger)
+			customers.POST("/:id/payments", auth.RequirePermission(auth.PermKhataView), d.recordPayment)
+		}
 
-			suppliers := protected.Group("/suppliers")
-			{
-				suppliers.GET("", d.listSuppliers)
-				suppliers.POST("", d.createSupplier)
-				suppliers.GET("/:id", d.getSupplier)
-				suppliers.PUT("/:id", d.updateSupplier)
-				suppliers.DELETE("/:id", d.deleteSupplier)
-			}
+		suppliers := protected.Group("/suppliers")
+		{
+			suppliers.GET("", auth.RequirePermission(auth.PermPurchaseView), d.listSuppliers)
+			suppliers.POST("", auth.RequirePermission(auth.PermPurchaseCreate), d.createSupplier)
+			suppliers.GET("/:id", auth.RequirePermission(auth.PermPurchaseView), d.getSupplier)
+			suppliers.PUT("/:id", auth.RequirePermission(auth.PermPurchaseCreate), d.updateSupplier)
+			suppliers.DELETE("/:id", auth.RequirePermission(auth.PermPurchaseCreate), d.deleteSupplier)
+		}
 
-			hsn := protected.Group("/hsn")
-			{
-				hsn.GET("", d.listHSNCodes)
-				hsn.POST("", auth.RequireOwner(), d.createHSNCode)
-				hsn.PUT("/:id/tax-rate", auth.RequireOwner(), d.upsertTaxRate)
-			}
+		hsn := protected.Group("/hsn")
+		{
+			hsn.GET("", auth.RequirePermission(auth.PermStockView), d.listHSNCodes)
+			hsn.POST("", auth.RequireRole(auth.RoleStoreOwner), d.createHSNCode)
+			hsn.PUT("/:id/tax-rate", auth.RequireRole(auth.RoleStoreOwner), d.upsertTaxRate)
+		}
 
 			protected.POST("/sales/checkout", auth.RequirePermission(auth.PermSalesCreate), d.checkout)
 
@@ -168,7 +175,7 @@ func NewRouter(d Deps) *gin.Engine {
 				salesInvoices.GET("", auth.RequirePermission(auth.PermSalesView), d.listSalesInvoices)
 				salesInvoices.GET("/resolve", auth.RequirePermission(auth.PermSalesView), d.getSalesInvoiceByNo)
 				salesInvoices.GET("/:id", auth.RequirePermission(auth.PermSalesView), d.getSalesInvoice)
-				salesInvoices.GET("/:id/pdf", PDFDeps{SaleRepo: d.SaleRepo, TaxRepo: d.TaxRepo, CustomerRepo: d.CustomerRepo}.generateB2BInvoicePDF)
+				salesInvoices.GET("/:id/pdf", auth.RequirePermission(auth.PermSalesView), PDFDeps{SaleRepo: d.SaleRepo, TaxRepo: d.TaxRepo, CustomerRepo: d.CustomerRepo}.generateB2BInvoicePDF)
 			}
 
 			purchaseInvoices := protected.Group("/purchases/invoices")
@@ -179,22 +186,22 @@ func NewRouter(d Deps) *gin.Engine {
 
 			reports := protected.Group("/reports")
 			{
-				reports.GET("/sales", d.salesReport)
-				reports.GET("/purchase", d.purchaseReport)
-				reports.GET("/profit-loss", d.profitLossReport)
-				reports.GET("/expiry", d.expiryReport)
-				reports.GET("/low-stock", d.lowStockReport)
+			reports.GET("/sales", auth.RequirePermission(auth.PermSalesView), d.salesReport)
+			reports.GET("/purchase", auth.RequirePermission(auth.PermPurchaseView), d.purchaseReport)
+			reports.GET("/profit-loss", auth.RequirePermission(auth.PermSalesView), d.profitLossReport)
+			reports.GET("/expiry", auth.RequirePermission(auth.PermStockView), d.expiryReport)
+			reports.GET("/low-stock", auth.RequirePermission(auth.PermStockView), d.lowStockReport)
 			}
 
 			gst := protected.Group("/gst")
 			{
-				gst.GET("/gstr1", d.GSTHandler.GetGSTR1)
-				gst.GET("/gstr1/preview", d.GSTHandler.GetGSTR1Preview)
-				gst.GET("/gstr1/excel", d.GSTHandler.DownloadGSTR1CSV)
-				gst.GET("/gstr3b", d.GSTHandler.GetGSTR3B)
-				gst.POST("/gstr2b/import", d.GSTHandler.ImportGSTR2B)
-				gst.GET("/gstr2b/batches", d.GSTHandler.ListGSTR2BBatches)
-				gst.GET("/gstr2b/batches/:id", d.GSTHandler.GetGSTR2BBatch)
+			gst.GET("/gstr1", auth.RequirePermission(auth.PermSalesView), d.GSTHandler.GetGSTR1)
+			gst.GET("/gstr1/preview", auth.RequirePermission(auth.PermSalesView), d.GSTHandler.GetGSTR1Preview)
+			gst.GET("/gstr1/excel", auth.RequirePermission(auth.PermSalesView), d.GSTHandler.DownloadGSTR1CSV)
+			gst.GET("/gstr3b", auth.RequirePermission(auth.PermSalesView), d.GSTHandler.GetGSTR3B)
+			gst.POST("/gstr2b/import", auth.RequirePermission(auth.PermPurchaseCreate), d.GSTHandler.ImportGSTR2B)
+			gst.GET("/gstr2b/batches", auth.RequirePermission(auth.PermPurchaseView), d.GSTHandler.ListGSTR2BBatches)
+			gst.GET("/gstr2b/batches/:id", auth.RequirePermission(auth.PermPurchaseView), d.GSTHandler.GetGSTR2BBatch)
 			}
 		}
 	}

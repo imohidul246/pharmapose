@@ -312,7 +312,7 @@ func (r *MedicineRepo) GetDetail(ctx context.Context, id string) (*models.Medici
 		       COALESCE(c.name, '')
 		FROM sales_invoice_items sii
 		JOIN sales_invoices si ON si.id = sii.invoice_id
-		LEFT JOIN customers c ON c.id = si.customer_id
+		LEFT JOIN customers c ON c.id = si.customer_id AND c.store_id = si.store_id
 		WHERE sii.medicine_id = $1 AND si.store_id = $2
 		ORDER BY si.created_at DESC
 		LIMIT 20`, id, sid)
