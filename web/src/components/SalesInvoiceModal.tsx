@@ -219,7 +219,7 @@ export function SalesInvoiceModal({
                     a.href = url
                     a.download = `B2B_${inv.invoice_no}.pdf`
                     a.click()
-                    URL.revokeObjectURL(url)
+                    setTimeout(() => URL.revokeObjectURL(url), 10_000)
                   } catch (err) {
                     alert(err instanceof Error ? err.message : String(err))
                   }

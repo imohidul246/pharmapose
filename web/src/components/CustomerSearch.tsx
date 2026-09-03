@@ -255,9 +255,12 @@ export function CustomerQueryField({
     limit,
   })
 
+  const onResultsRef = useRef(onResults)
+  onResultsRef.current = onResults
+
   useEffect(() => {
-    onResults(results)
-  }, [results, onResults])
+    onResultsRef.current(results)
+  }, [results])
 
   return (
     <div className="relative">

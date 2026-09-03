@@ -2,12 +2,41 @@ package handlers
 
 import (
 	"net/http"
+	"strconv"
 
 	"github.com/gin-gonic/gin"
 
 	"github.com/mohi/pms-marg-inspired/internal/models"
 	"github.com/mohi/pms-marg-inspired/internal/repository"
 )
+
+// parsePagination parses ?page= and ?limit= with defaults limit=100, page=1.
+// Limits are clamped to [1,200]; pages <1 become 1. It returns limit, offset, page.
+func parsePagination(c *gin.Context) (limit, offset, page int) {
+	limit = 100
+	page = 1
+	if v := c.Query("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			limit = n
+		}
+	}
+	if v := c.Query("page"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			page = n
+		}
+	}
+	if limit <= 0 {
+		limit = 100
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	if page < 1 {
+		page = 1
+	}
+	offset = (page - 1) * limit
+	return limit, offset, page
+}
 
 // POST /api/purchase-requests — an employee (or owner) submits a proposed
 // purchase inward for review. Stock is not mutated here; the snapshot is
@@ -30,15 +59,16 @@ func (d *Deps) createPurchaseRequest(c *gin.Context) {
 	c.JSON(http.StatusCreated, gin.H{"request": req})
 }
 
-// GET /api/purchase-requests?status=PENDING
+// GET /api/purchase-requests?status=PENDING&page=1&limit=100
 func (d *Deps) listPurchaseRequests(c *gin.Context) {
 	p := currentPrincipal(c)
-	reqs, err := d.PurchaseRequestRepo.List(c.Request.Context(), p.StoreID, c.Query("status"), 100)
+	limit, offset, page := parsePagination(c)
+	reqs, total, err := d.PurchaseRequestRepo.List(c.Request.Context(), p.StoreID, c.Query("status"), limit, offset)
 	if err != nil {
 		respondInternal(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"requests": reqs})
+	c.JSON(http.StatusOK, gin.H{"requests": reqs, "total_count": total, "limit": limit, "page": page})
 }
 
 // GET /api/purchase-requests/:id
@@ -60,6 +90,9 @@ func (d *Deps) getPurchaseRequest(c *gin.Context) {
 // inward and marks the request approved, atomically.
 func (d *Deps) approvePurchaseRequest(c *gin.Context) {
 	p := currentPrincipal(c)
+	if !assertOwner(c, p) {
+		return
+	}
 	po, items, err := d.PurchaseRequestRepo.Approve(c.Request.Context(), p.StoreID, c.Param("id"), p.UserID)
 	if err != nil {
 		mapRepoError(c, err)
@@ -75,6 +108,9 @@ func (d *Deps) approvePurchaseRequest(c *gin.Context) {
 // POST /api/purchase-requests/:id/reject — owner rejects the request.
 func (d *Deps) rejectPurchaseRequest(c *gin.Context) {
 	p := currentPrincipal(c)
+	if !assertOwner(c, p) {
+		return
+	}
 	var in struct {
 		Reason string `json:"reason"`
 	}
@@ -119,15 +155,16 @@ func (d *Deps) createStockAuditRequest(c *gin.Context) {
 	c.JSON(http.StatusCreated, gin.H{"request": req, "items": items})
 }
 
-// GET /api/stock-audit-requests?status=PENDING
+// GET /api/stock-audit-requests?status=PENDING&page=1&limit=100
 func (d *Deps) listStockAuditRequests(c *gin.Context) {
 	p := currentPrincipal(c)
-	reqs, err := d.StockAuditRequestRepo.List(c.Request.Context(), p.StoreID, c.Query("status"), 100)
+	limit, offset, page := parsePagination(c)
+	reqs, total, err := d.StockAuditRequestRepo.List(c.Request.Context(), p.StoreID, c.Query("status"), limit, offset)
 	if err != nil {
 		respondInternal(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"requests": reqs})
+	c.JSON(http.StatusOK, gin.H{"requests": reqs, "total_count": total, "limit": limit, "page": page})
 }
 
 // GET /api/stock-audit-requests/:id
@@ -150,6 +187,9 @@ func (d *Deps) getStockAuditRequest(c *gin.Context) {
 // (ErrStaleStock).
 func (d *Deps) approveStockAuditRequest(c *gin.Context) {
 	p := currentPrincipal(c)
+	if !assertOwner(c, p) {
+		return
+	}
 	journal, items, err := d.StockAuditRequestRepo.Approve(c.Request.Context(), p.StoreID, c.Param("id"), p.UserID)
 	if err != nil {
 		mapRepoError(c, err)
@@ -165,6 +205,9 @@ func (d *Deps) approveStockAuditRequest(c *gin.Context) {
 // POST /api/stock-audit-requests/:id/reject — owner rejects the audit.
 func (d *Deps) rejectStockAuditRequest(c *gin.Context) {
 	p := currentPrincipal(c)
+	if !assertOwner(c, p) {
+		return
+	}
 	var in struct {
 		Reason string `json:"reason"`
 	}

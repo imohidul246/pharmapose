@@ -281,8 +281,16 @@ export default function Login() {
             )}
 
             {error && (
-              <p role="alert" className="rounded-lg bg-brick-bg px-3 py-2 text-xs font-medium text-brick-text">
-                {error}
+              <p
+                role="alert"
+                className={
+                  'rounded-lg px-3 py-2 text-xs font-medium ' +
+                  (/subscription|renewal|administrator/i.test(error)
+                    ? 'bg-marigold-bg text-marigold-text'
+                    : 'bg-brick-bg text-brick-text')
+                }
+              >
+                {/subscription|renewal|administrator/i.test(error) ? `⚠ ${error}` : error}
               </p>
             )}
 

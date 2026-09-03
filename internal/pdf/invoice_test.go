@@ -54,7 +54,7 @@ func TestTaxDisplayInterState(t *testing.T) {
 			Invoice: baseInvoice(),
 			Items:   []repository.SalesInvoiceItemDetail{sampleItem("Dolo 650", "30049099", 5, 0, 0, 5)},
 		},
-		Seller: SellerInfo{Name: "ABC", GSTIN: "18X", PAN: "P", Phone: "9"},
+		Seller: SellerInfo{Name: "ABC", GSTIN: "18X", PAN: "P", Phone: "9", StateCode: "18"},
 		Buyer:  BuyerInfo{Name: "B", GSTIN: "07Y"},
 	}
 	parts := printTaxParts(d.Invoice.Items[0])
@@ -204,7 +204,7 @@ func TestGeneratePDF(t *testing.T) {
 	}
 	d := InvoiceData{
 		Invoice: repository.SalesInvoiceDetail{Invoice: inv, Items: items},
-		Seller:  SellerInfo{Name: "ABC Pharmacy", Address: "Assam", GSTIN: "18X", PAN: "P", Phone: "9"},
+		Seller:  SellerInfo{Name: "ABC Pharmacy", Address: "Assam", GSTIN: "18X", PAN: "P", Phone: "9", StateCode: "18", StateName: "Assam"},
 		Buyer:   BuyerInfo{Name: "Hosp", GSTIN: "07Y", Address: "Delhi", Phone: "8"},
 	}
 	var buf bytes.Buffer
@@ -246,7 +246,7 @@ func TestSellerCompleteData(t *testing.T) {
 	}
 	lines := d.sellerLines()
 	for _, want := range []string{
-		"ABC Pharmacy",
+		"Store Name: ABC Pharmacy",
 		"GSTIN: 18ABCDE1234F1Z5",
 		"PAN: ABCDE1234F",
 		"Address: G.S. Road, Guwahati, Assam 781005",
@@ -289,7 +289,7 @@ func TestSellerLongAddressWrapping(t *testing.T) {
 			Invoice: baseInvoice(),
 			Items:   []repository.SalesInvoiceItemDetail{sampleItem("Calpol", "30049099", 5, 0, 0, 5)},
 		},
-		Seller: SellerInfo{Name: "ABC Pharmacy", Address: longAddr, GSTIN: "18X", PAN: "P", Phone: "+91 9"},
+		Seller: SellerInfo{Name: "ABC Pharmacy", Address: longAddr, GSTIN: "18X", PAN: "P", Phone: "+91 9", StateCode: "18", StateName: "Assam"},
 		Buyer:  BuyerInfo{Name: "B"},
 	}
 	// The address must be represented in the seller line set and must not be
@@ -316,7 +316,7 @@ func TestSellerLongAddressWrapping(t *testing.T) {
 // TestTableHeadersPresent verifies all required column headers are defined and
 // that they remain inside the 180mm content width (no clipped/overrun header).
 func TestTableHeadersPresent(t *testing.T) {
-	want := []string{"#", "MEDICINE", "HSN", "MRP", "SELL PRICE", "QTY", "BONUS", "DISCOUNT", "TAXABLE", "TAX", "TOTAL"}
+	want := []string{"MEDICINE", "HSN", "MRP", "SELL", "QTY", "BONUS", "DISC.", "TAXABLE", "TAX", "TOTAL"}
 	if len(itemColumns) != len(want) {
 		t.Fatalf("expected %d columns, got %d", len(want), len(itemColumns))
 	}

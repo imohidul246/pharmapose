@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/shopspring/decimal"
 
 	"github.com/mohi/pms-marg-inspired/internal/auth"
 	"github.com/mohi/pms-marg-inspired/internal/database"
@@ -97,10 +98,10 @@ resetDatabase(ctx, pool)
 		log.Fatalf("seed team: %v", err)
 	}
 
-	supplierRepo := repository.NewSupplierRepo(pool, storeID)
-	medRepo := repository.NewMedicineRepo(pool, storeID)
+	supplierRepo := repository.NewSupplierRepo(pool)
+	medRepo := repository.NewMedicineRepo(pool)
 	purchaseRepo := repository.NewPurchaseRepo(pool)
-	customerRepo := repository.NewCustomerRepo(pool, storeID)
+	customerRepo := repository.NewCustomerRepo(pool)
 	saleRepo := repository.NewSaleRepo(pool)
 	taxRepo := repository.NewTaxRepo(pool)
 
@@ -118,7 +119,7 @@ resetDatabase(ctx, pool)
 	}
 	supplierIDs := make([]string, 0, len(suppliers))
 	for i := range suppliers {
-		if err := supplierRepo.Create(ctx, &suppliers[i]); err != nil {
+		if err := supplierRepo.Create(ctx, storeID, &suppliers[i]); err != nil {
 			log.Fatalf("create supplier %s: %v", suppliers[i].LegalName, err)
 		}
 		supplierIDs = append(supplierIDs, suppliers[i].ID)
@@ -178,7 +179,7 @@ resetDatabase(ctx, pool)
 		m := &models.Medicine{Name: sm.Name, SaltComposition: sm.Salt,
 			Manufacturer: sm.Manufacturer, MinReorderLevel: sm.MinReorder,
 			UQC: sm.UQC, Packing: "Strip"}
-		if err := medRepo.Create(ctx, m); err != nil {
+		if err := medRepo.Create(ctx, storeID, m); err != nil {
 			log.Fatalf("create medicine %s: %v", sm.Name, err)
 		}
 		if err := assignTaxConfig(ctx, taxRepo, storeID, m.ID, sm); err != nil {
@@ -212,7 +213,7 @@ resetDatabase(ctx, pool)
 			log.Fatalf("inward for %s: %v", m.Name, err)
 		}
 		for _, sb := range sm.Batches {
-			b, err := medRepo.FindBatchByNumber(ctx, m.ID, sb.Number)
+			b, err := medRepo.FindBatchByNumber(ctx, storeID, m.ID, sb.Number)
 			if err != nil {
 				log.Fatalf("find batch %s/%s: %v", sm.Name, sb.Number, err)
 			}
@@ -237,7 +238,7 @@ resetDatabase(ctx, pool)
 	var retailCustomerIDs []string
 	var b2bCustomers []models.Customer
 	for i := range customers {
-		if err := customerRepo.Create(ctx, &customers[i]); err != nil {
+		if err := customerRepo.Create(ctx, storeID, &customers[i]); err != nil {
 			log.Fatalf("create customer %s: %v", customers[i].Name, err)
 		}
 		if customers[i].CustomerType == "B2B" {
@@ -303,7 +304,7 @@ resetDatabase(ctx, pool)
 			if bs.inter {
 				pos = "06"
 			}
-			wholesale := round2(batch.SalePrice * 0.88)
+			wholesale := roundMoney(batch.SalePrice * 0.88)
 			in := &repository.CheckoutInput{
 				PaymentType:   models.PaymentCredit,
 				CustomerID:    &cust.ID,
@@ -627,4 +628,8 @@ func derefStr(p *string) string {
 	}
 	return *p
 }
-func round2(v float64) float64 { return float64(int(v*100+0.5)) / 100 }
+
+// roundMoney is banker's rounding via the tax engine (seed pricing only).
+func roundMoney(v float64) float64 {
+	return tax.RoundMoney(decimal.NewFromFloat(v)).InexactFloat64()
+}

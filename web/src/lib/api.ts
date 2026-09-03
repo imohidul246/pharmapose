@@ -17,6 +17,7 @@ import type {
   Membership,
   MedicineDetail,
   MedicineTaxConfig,
+  PlatformStoreInfo,
   Principal,
   ProfitLossReport,
   PurchaseInvoiceDetail,
@@ -33,6 +34,9 @@ import type {
   StockAuditRequest,
   StockAuditRequestItem,
   Store,
+  SubscriptionPayment,
+  SubscriptionPlanType,
+  SubscriptionStatus,
   Supplier,
   TaxRate,
 } from '../types'
@@ -44,6 +48,13 @@ export class UnauthorizedError extends Error {
   }
 }
 
+export class SubscriptionExpiredError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'SubscriptionExpiredError'
+  }
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, {
     headers: { 'Content-Type': 'application/json' },
@@ -51,10 +62,23 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   })
   if (!res.ok) {
     let message = `request failed (${res.status})`
+    let code = ''
     try {
       const body = await res.json()
-      if (body && typeof body.error === 'string') message = body.error
-    } catch {
+      if (body && typeof body.error === 'string') {
+        code = body.error
+        message = body.error
+      }
+      // Prefer the human-readable message when the server sends one (e.g.
+      // the subscription gate returns {error, message}).
+      if (body && typeof body.message === 'string' && body.message.trim() !== '') {
+        message = body.message
+      }
+      if (code === 'subscription_expired') {
+        throw new SubscriptionExpiredError(message)
+      }
+    } catch (err) {
+      if (err instanceof SubscriptionExpiredError) throw err
       /* keep default */
     }
     // A 401 only means the session died when the server says so. On login a 401
@@ -171,7 +195,7 @@ export const api = {
 
   createStockAuditRequest(
     notes: string,
-    items: { batch_id: string; physical_count: number; reason: string }[],
+    items: { medicine_id: string; batch_id: string; physical_quantity: number; reason: string }[],
   ): Promise<{ request: StockAuditRequest; items: StockAuditRequestItem[] }> {
     return request('/api/stock-audit-requests', {
       method: 'POST',
@@ -459,5 +483,32 @@ export const api = {
       if (!res.ok) throw new Error('Failed to download invoice PDF')
       return res.blob()
     })
+  },
+
+  // ---- Platform administration (super-admin only) ----
+
+  platformStores(): Promise<{ stores: PlatformStoreInfo[] }> {
+    return request('/api/platform/stores')
+  },
+
+  platformRenew(
+    storeId: string,
+    input: { plan_type: SubscriptionPlanType; amount: number; notes?: string },
+  ): Promise<{ payment: SubscriptionPayment }> {
+    return request(`/api/platform/stores/${storeId}/renew`, {
+      method: 'POST',
+      body: JSON.stringify(input),
+    })
+  },
+
+  platformSetStatus(storeId: string, status: SubscriptionStatus): Promise<{ status: string }> {
+    return request(`/api/platform/stores/${storeId}/status`, {
+      method: 'PUT',
+      body: JSON.stringify({ status }),
+    })
+  },
+
+  platformPayments(storeId: string): Promise<{ payments: SubscriptionPayment[] }> {
+    return request(`/api/platform/stores/${storeId}/payments`)
   },
 }

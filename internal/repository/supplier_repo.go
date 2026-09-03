@@ -11,17 +11,23 @@ import (
 	"github.com/mohi/pms-marg-inspired/internal/tax"
 )
 
+// SupplierRepo owns the tenant-scoped supplier catalogue. Every method takes
+// the acting storeID explicitly — the store is never pinned at construction
+// and never trusted from the client — and every query filters strictly by
+// store_id = $x, so one store can never read or mutate another's suppliers.
 type SupplierRepo struct {
-	db    *pgxpool.Pool
-	store *storeIDRef
+	db *pgxpool.Pool
 }
 
-func NewSupplierRepo(db *pgxpool.Pool, storeID string) *SupplierRepo {
-	return &SupplierRepo{db: db, store: newStoreIDRef(db, storeID)}
+func NewSupplierRepo(db *pgxpool.Pool) *SupplierRepo {
+	return &SupplierRepo{db: db}
 }
 
-func (r *SupplierRepo) storeID(ctx context.Context) (string, error) {
-	return r.store.get(ctx)
+func requireStoreID(storeID string) error {
+	if storeID == "" {
+		return errors.New("store_id is required")
+	}
+	return nil
 }
 
 func ValidateSupplier(s *models.Supplier) error {
@@ -50,41 +56,38 @@ func scanSupplier(row pgx.Row) (*models.Supplier, error) {
 	return &s, nil
 }
 
-func (r *SupplierRepo) Create(ctx context.Context, s *models.Supplier) error {
-	sid, err := r.storeID(ctx)
-	if err != nil {
+func (r *SupplierRepo) Create(ctx context.Context, storeID string, s *models.Supplier) error {
+	if err := requireStoreID(storeID); err != nil {
 		return err
 	}
 	return r.db.QueryRow(ctx, `
 		INSERT INTO suppliers (legal_name, trade_name, gstin, pan, address, state, state_code, phone, email, store_id)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		RETURNING `+supplierColumns,
-		s.LegalName, s.TradeName, s.GSTIN, s.PAN, s.Address, s.State, s.StateCode, s.Phone, s.Email, sid,
+		s.LegalName, s.TradeName, s.GSTIN, s.PAN, s.Address, s.State, s.StateCode, s.Phone, s.Email, storeID,
 	).Scan(&s.ID, &s.LegalName, &s.TradeName, &s.GSTIN, &s.PAN,
 		&s.Address, &s.State, &s.StateCode, &s.Phone, &s.Email,
 		&s.CreatedAt, &s.UpdatedAt)
 }
 
-func (r *SupplierRepo) GetByID(ctx context.Context, id string) (*models.Supplier, error) {
-	sid, err := r.storeID(ctx)
-	if err != nil {
+func (r *SupplierRepo) GetByID(ctx context.Context, storeID, id string) (*models.Supplier, error) {
+	if err := requireStoreID(storeID); err != nil {
 		return nil, err
 	}
 	s, err := scanSupplier(r.db.QueryRow(ctx,
-		`SELECT `+supplierColumns+` FROM suppliers WHERE id = $1 AND store_id = $2`, id, sid))
+		`SELECT `+supplierColumns+` FROM suppliers WHERE id = $1 AND store_id = $2`, id, storeID))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, models.ErrNotFound
 	}
 	return s, err
 }
 
-func (r *SupplierRepo) List(ctx context.Context) ([]models.Supplier, error) {
-	sid, err := r.storeID(ctx)
-	if err != nil {
+func (r *SupplierRepo) List(ctx context.Context, storeID string) ([]models.Supplier, error) {
+	if err := requireStoreID(storeID); err != nil {
 		return nil, err
 	}
 	rows, err := r.db.Query(ctx,
-		`SELECT `+supplierColumns+` FROM suppliers WHERE store_id = $1 ORDER BY legal_name`, sid)
+		`SELECT `+supplierColumns+` FROM suppliers WHERE store_id = $1 ORDER BY legal_name`, storeID)
 	if err != nil {
 		return nil, err
 	}
@@ -103,9 +106,8 @@ func (r *SupplierRepo) List(ctx context.Context) ([]models.Supplier, error) {
 	return out, rows.Err()
 }
 
-func (r *SupplierRepo) Update(ctx context.Context, s *models.Supplier) error {
-	sid, err := r.storeID(ctx)
-	if err != nil {
+func (r *SupplierRepo) Update(ctx context.Context, storeID string, s *models.Supplier) error {
+	if err := requireStoreID(storeID); err != nil {
 		return err
 	}
 	tag, err := r.db.Exec(ctx, `
@@ -115,7 +117,7 @@ func (r *SupplierRepo) Update(ctx context.Context, s *models.Supplier) error {
 		    updated_at = now()
 		WHERE id = $1 AND store_id = $11`,
 		s.ID, s.LegalName, s.TradeName, s.GSTIN, s.PAN,
-		s.Address, s.State, s.StateCode, s.Phone, s.Email, sid)
+		s.Address, s.State, s.StateCode, s.Phone, s.Email, storeID)
 	if err != nil {
 		return err
 	}
@@ -125,12 +127,11 @@ func (r *SupplierRepo) Update(ctx context.Context, s *models.Supplier) error {
 	return nil
 }
 
-func (r *SupplierRepo) Delete(ctx context.Context, id string) error {
-	sid, err := r.storeID(ctx)
-	if err != nil {
+func (r *SupplierRepo) Delete(ctx context.Context, storeID, id string) error {
+	if err := requireStoreID(storeID); err != nil {
 		return err
 	}
-	tag, err := r.db.Exec(ctx, `DELETE FROM suppliers WHERE id = $1 AND store_id = $2`, id, sid)
+	tag, err := r.db.Exec(ctx, `DELETE FROM suppliers WHERE id = $1 AND store_id = $2`, id, storeID)
 	if err != nil {
 		return err
 	}

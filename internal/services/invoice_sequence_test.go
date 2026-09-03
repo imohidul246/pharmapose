@@ -1,12 +1,52 @@
 package services_test
 
 import (
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/mohi/pms-marg-inspired/internal/services"
 )
+
+// TestInvoiceNumberLength verifies CGST Rule 46(b): invoice serials for store
+// codes of varying lengths never exceed 16 characters.
+func TestInvoiceNumberLength(t *testing.T) {
+	for _, code := range []string{"S1", "S12", "INV", "B2B", "ST01"} {
+		for _, seq := range []int{1, 99999} {
+			got, err := services.FormatInvoiceNumber(code, "26-27", seq)
+			if err != nil {
+				t.Errorf("FormatInvoiceNumber(%q, seq=%d): unexpected error: %v", code, seq, err)
+				continue
+			}
+			if len(got) > 16 {
+				t.Errorf("invoice number %q (%d chars) exceeds 16", got, len(got))
+			}
+		}
+	}
+	// Overflow and oversize codes are rejected, never truncated.
+	for _, tc := range []struct {
+		code string
+		seq  int
+	}{
+		{"INVA", 100000}, // 4+1+5+1+6 = 17 chars
+		{"ST01", 100000},
+		{"STORE01", 1}, // 7+1+5+1+5 = 19 chars: code itself cannot fit
+	} {
+		if got, err := services.FormatInvoiceNumber(tc.code, "26-27", tc.seq); err == nil {
+			t.Errorf("FormatInvoiceNumber(%q, seq=%d) = %q want length error", tc.code, tc.seq, got)
+		}
+	}
+
+	// Spec example shape: S1/26-27/000001.
+	got, err := services.FormatInvoiceNumber("S1", "26-27", 1)
+	if err != nil {
+		t.Fatalf("format: %v", err)
+	}
+	if !strings.HasPrefix(got, "S1/26-27/") {
+		t.Errorf("invoice number = %q want S1/26-27/ prefix", got)
+	}
+}
 
 func TestFinancialYear_AprilOnwards(t *testing.T) {
 	// April 1, 2026 → "2026-27"

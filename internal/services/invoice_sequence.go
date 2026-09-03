@@ -31,17 +31,41 @@ func FinancialYear(t time.Time) string {
 }
 
 // NextInvoiceNumber generates the next gapless invoice number for a store
-// within the current financial year. It uses SELECT ... FOR UPDATE to ensure
-// thread safety even under concurrent checkouts.
+// within the current financial year. It delegates to NextInvoiceNumberAt
+// with the current time; back-dated flows must call NextInvoiceNumberAt with
+// the invoice date so the number lands in the invoice's own financial year.
 //
-// Format: INV/YY-YY/NNNNN (e.g. INV/26-27/00001)
+// Atomicity: the INSERT ... ON CONFLICT DO NOTHING plus the conditional
+// UPDATE ... RETURNING run inside the caller's transaction. Concurrent
+// checkouts serialize on the sequence row lock, so each commits with a
+// distinct last_value — duplicates are impossible. A rolled-back transaction
+// burns its number (the increment does not roll back visibly to others),
+// which is the standard, acceptable source of gaps; committed numbers are
+// strictly gapless per (store, financial year, prefix).
+//
+// Format complies with CGST Rule 46(b): consecutive, unique per financial
+// year, max 16 characters. Format: PREFIX/YY-YY/NNNNN (e.g. INV/26-27/00001
+// = 15 chars, CN/26-27/00001 = 14 chars). The sequence row is isolated by
+// (store_id, financial_year, prefix) so every store + FY has an independent
+// series.
 func (s *InvoiceSequence) NextInvoiceNumber(ctx context.Context, tx pgx.Tx, storeID string, prefix string) (string, string, error) {
-	fy := FinancialYear(time.Now().UTC())
+	return s.NextInvoiceNumberAt(ctx, tx, storeID, prefix, time.Now().UTC())
+}
+
+// NextInvoiceNumberAt behaves like NextInvoiceNumber but attributes the
+// number to the financial year containing `at` (the invoice date), so
+// back-dated invoices (CheckoutAt, historical seeding) never borrow numbers
+// from the wrong financial year.
+func (s *InvoiceSequence) NextInvoiceNumberAt(ctx context.Context, tx pgx.Tx, storeID string, prefix string, at time.Time) (string, string, error) {
+	fy := FinancialYear(at)
 
 	// If no store_id, use an in-memory atomic fallback (for tests/legacy)
 	if storeID == "" {
 		seq := s.fallbackSeq.Add(1)
-		invoiceNo := fmt.Sprintf("%s%s/%05d", prefix, formatFY(fy), seq)
+		invoiceNo, err := FormatInvoiceNumber(seriesCode(prefix), formatFY(fy), int(seq))
+		if err != nil {
+			return "", fy, err
+		}
 		return invoiceNo, fy, nil
 	}
 
@@ -67,15 +91,26 @@ func (s *InvoiceSequence) NextInvoiceNumber(ctx context.Context, tx pgx.Tx, stor
 		return "", fy, fmt.Errorf("increment invoice sequence: %w", err)
 	}
 
-	invoiceNo := fmt.Sprintf("%s%s/%05d", prefix, formatFY(fy), nextVal)
+	invoiceNo, err := FormatInvoiceNumber(seriesCode(prefix), formatFY(fy), nextVal)
+	if err != nil {
+		return "", fy, err
+	}
 	return invoiceNo, fy, nil
 }
 
-// NextCreditNoteNumber generates the next credit note number for a store.
+// NextCreditNoteNumber generates the next credit note number for a store
+// within the current financial year.
 //
-// Format: CN/YY-YY/NNNNN
+// Format: CN/YY-YY/NNNNN (max 16 chars, unique per FY per store).
 func (s *InvoiceSequence) NextCreditNoteNumber(ctx context.Context, tx pgx.Tx, storeID string) (string, string, error) {
 	return s.NextInvoiceNumber(ctx, tx, storeID, "CN/")
+}
+
+// NextCreditNoteNumberAt behaves like NextCreditNoteNumber but attributes the
+// number to the financial year containing `at` (the note date), so back-dated
+// returns never borrow numbers from the wrong financial year.
+func (s *InvoiceSequence) NextCreditNoteNumberAt(ctx context.Context, tx pgx.Tx, storeID string, at time.Time) (string, string, error) {
+	return s.NextInvoiceNumberAt(ctx, tx, storeID, "CN/", at)
 }
 
 // formatFY converts "2026-27" to "26-27" for display in invoice numbers.
@@ -84,4 +119,30 @@ func formatFY(fy string) string {
 		return fy[2:]
 	}
 	return fy
+}
+
+// FormatInvoiceNumber renders a statutory serial in the compact form
+// [ShortStoreCode]/[FY]/[Seq] (e.g. S1/26-27/000001 = 15 chars) and rejects
+// anything exceeding the CGST Rule 46(b) 16-character limit before it can be
+// committed. seq is zero-padded to at least 5 digits and grows naturally
+// past 99999 (the length guard, not truncation, is what keeps overflow safe).
+func FormatInvoiceNumber(storeCode, fyShort string, seq int) (string, error) {
+	invoiceNo := fmt.Sprintf("%s/%s/%05d", storeCode, fyShort, seq)
+	if len(invoiceNo) > 16 {
+		return "", fmt.Errorf("invoice number '%s' exceeds statutory 16-character limit", invoiceNo)
+	}
+	return invoiceNo, nil
+}
+
+// seriesCode trims a sequence prefix ("INV/", "CN/") to its short series code
+// ("INV", "CN") for FormatInvoiceNumber.
+func seriesCode(prefix string) string {
+	code := prefix
+	for len(code) > 0 && code[len(code)-1] == '/' {
+		code = code[:len(code)-1]
+	}
+	if code == "" {
+		return "INV"
+	}
+	return code
 }

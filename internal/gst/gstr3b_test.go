@@ -55,7 +55,7 @@ func seed3BMedicine(t *testing.T, name string) string {
 		Packing:         "Strip of 10",
 		UQC:             "TAB",
 	}
-	if err := medRepo.Create(ctx, m); err != nil {
+	if err := medRepo.Create(ctx, testutil.StoreID, m); err != nil {
 		t.Fatalf("create medicine: %v", err)
 	}
 	if _, err := pool.Exec(ctx, `

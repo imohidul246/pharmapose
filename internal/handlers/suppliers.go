@@ -10,7 +10,7 @@ import (
 )
 
 func (d Deps) listSuppliers(c *gin.Context) {
-	suppliers, err := d.SupplierRepo.List(c.Request.Context())
+	suppliers, err := d.SupplierRepo.List(c.Request.Context(), storeIDFor(c))
 	if err != nil {
 		respondInternal(c, err)
 		return
@@ -24,7 +24,7 @@ func (d Deps) createSupplier(c *gin.Context) {
 		respondError(c, http.StatusBadRequest, err.Error())
 		return
 	}
-	if err := d.SupplierRepo.Create(c.Request.Context(), &s); err != nil {
+	if err := d.SupplierRepo.Create(c.Request.Context(), storeIDFor(c), &s); err != nil {
 		if errors.Is(err, models.ErrNotFound) {
 			respondError(c, http.StatusNotFound, "not found")
 			return
@@ -37,7 +37,7 @@ func (d Deps) createSupplier(c *gin.Context) {
 
 func (d Deps) getSupplier(c *gin.Context) {
 	id := c.Param("id")
-	s, err := d.SupplierRepo.GetByID(c.Request.Context(), id)
+	s, err := d.SupplierRepo.GetByID(c.Request.Context(), storeIDFor(c), id)
 	if err != nil {
 		if errors.Is(err, models.ErrNotFound) {
 			respondError(c, http.StatusNotFound, "supplier not found")
@@ -57,7 +57,7 @@ func (d Deps) updateSupplier(c *gin.Context) {
 		return
 	}
 	s.ID = id
-	if err := d.SupplierRepo.Update(c.Request.Context(), &s); err != nil {
+	if err := d.SupplierRepo.Update(c.Request.Context(), storeIDFor(c), &s); err != nil {
 		if errors.Is(err, models.ErrNotFound) {
 			respondError(c, http.StatusNotFound, "supplier not found")
 			return
@@ -70,7 +70,7 @@ func (d Deps) updateSupplier(c *gin.Context) {
 
 func (d Deps) deleteSupplier(c *gin.Context) {
 	id := c.Param("id")
-	if err := d.SupplierRepo.Delete(c.Request.Context(), id); err != nil {
+	if err := d.SupplierRepo.Delete(c.Request.Context(), storeIDFor(c), id); err != nil {
 		if errors.Is(err, models.ErrNotFound) {
 			respondError(c, http.StatusNotFound, "supplier not found")
 			return

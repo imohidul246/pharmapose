@@ -11,69 +11,6 @@ import (
 	"github.com/mohi/pms-marg-inspired/internal/testutil"
 )
 
-// seedHighValueMedicine creates a B2C medicine with a high unit price and
-// ample stock so an inter-state invoice can exceed the B2CL threshold (Rs 1 L).
-func seedHighValueMedicine(t *testing.T) string {
-	t.Helper()
-	ctx := context.Background()
-
-	m := &models.Medicine{
-		Name:            "GSTR1 Surgical Kit",
-		SaltComposition: "High value kit",
-		Manufacturer:    "GSTPharma",
-		MinReorderLevel: 5,
-		Packing:         "Kit",
-		UQC:             "NOS",
-	}
-	if err := medRepo.Create(ctx, m); err != nil {
-		t.Fatalf("create medicine: %v", err)
-	}
-
-	var hsnCount int
-	pool.QueryRow(ctx, `SELECT COUNT(*) FROM hsn_codes WHERE code = '3004' AND store_id = $1`, testutil.StoreID).Scan(&hsnCount)
-	if hsnCount == 0 {
-		_, err := pool.Exec(ctx, `
-			INSERT INTO hsn_codes (store_id, code, description) VALUES
-				($1, '3004', 'Medicaments for therapeutic or prophylactic uses, packed for retail sale')
-			ON CONFLICT (store_id, code) DO NOTHING`, testutil.StoreID)
-		if err != nil {
-			t.Fatalf("seed hsn: %v", err)
-		}
-	}
-	_, err := pool.Exec(ctx, `
-		INSERT INTO medicine_tax_config (store_id, medicine_id, hsn_code_id, tax_rate_id, price_includes_tax, effective_from)
-		SELECT $1, $2, h.id, tr.id, false, '2017-07-01'::date
-		FROM hsn_codes h
-		JOIN tax_rates tr ON tr.hsn_code_id = h.id
-		WHERE h.code = '3004' AND tr.effective_to IS NULL
-		ON CONFLICT DO NOTHING`, testutil.StoreID, m.ID)
-	if err != nil {
-		t.Fatalf("link tax config: %v", err)
-	}
-
-	in := &repository.PurchaseInput{
-		InvoiceNo:    "GSTR1-HIGH-1",
-		SupplierName: "GSTR1 Supplier",
-		StoreID:      testutil.StoreIDPtr(),
-		Items: []repository.PurchaseItemInput{{
-			MedicineID:    m.ID,
-			BatchNumber:   "GSTR1-HB1",
-			ExpiryDate:    models.NewDate(time.Now().AddDate(2, 0, 0)),
-			Quantity:      2000,
-			PurchasePrice: 80000,
-			SalePrice:     150000,
-		}},
-	}
-	if _, _, err := purchRepo.CreateInward(ctx, in); err != nil {
-		t.Fatalf("seed high inward: %v", err)
-	}
-	batch, err := medRepo.FindBatchByNumber(ctx, m.ID, "GSTR1-HB1")
-	if err != nil {
-		t.Fatalf("find batch: %v", err)
-	}
-	return batch.ID
-}
-
 func TestBuildGSTR1_HSNCombinedSummary(t *testing.T) {
 	reset(t)
 	_, batchID := seedGSTMedicine(t)
@@ -190,6 +127,82 @@ func TestBuildGSTR1_B2CSAggregation(t *testing.T) {
 	}
 }
 
+// seedGSTMedicineInStore provisions a 12%-GST (HSN 3004) medicine plus one
+// stocked batch entirely inside storeID: store-local HSN row, tax rate,
+// medicine config and inward. Tenant isolation forbids selling another
+// store's batch, so GSTR tests that bill a dedicated store must seed their
+// fixtures there rather than in the shared test store.
+func seedGSTMedicineInStore(t *testing.T, storeID, name, batchNo string, qty, purchasePrice, salePrice int) (medicineID, batchID string) {
+	t.Helper()
+	ctx := context.Background()
+
+	storeMedRepo := repository.NewMedicineRepo(pool)
+	m := &models.Medicine{
+		Name:            name,
+		SaltComposition: "Paracetamol 500mg",
+		Manufacturer:    "GSTPharma",
+		MinReorderLevel: 5,
+		Packing:         "Strip of 10",
+		UQC:             "TAB",
+	}
+	if err := storeMedRepo.Create(ctx, storeID, m); err != nil {
+		t.Fatalf("create medicine in store %s: %v", storeID, err)
+	}
+
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO hsn_codes (store_id, code, description) VALUES
+			($1, '3004', 'Medicaments for therapeutic or prophylactic uses, packed for retail sale')
+		ON CONFLICT (store_id, code) DO NOTHING`, storeID); err != nil {
+		t.Fatalf("seed hsn: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO tax_rates (store_id, hsn_code_id, gst_rate, cgst_rate, sgst_rate, igst_rate, cess_rate, effective_from)
+		SELECT $1, h.id, 12.00, 6.00, 6.00, 12.00, 0.00, '2017-07-01'::date
+		FROM hsn_codes h WHERE h.code = '3004' AND h.store_id = $1
+		ON CONFLICT DO NOTHING`, storeID); err != nil {
+		t.Fatalf("seed tax rate: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO medicine_tax_config (store_id, medicine_id, hsn_code_id, tax_rate_id, price_includes_tax, effective_from)
+		SELECT $1, $2, h.id, tr.id, false, '2017-07-01'::date
+		FROM hsn_codes h
+		JOIN tax_rates tr ON tr.hsn_code_id = h.id AND tr.store_id = $1 AND tr.effective_to IS NULL
+		WHERE h.code = '3004' AND h.store_id = $1
+		ON CONFLICT DO NOTHING`, storeID, m.ID); err != nil {
+		t.Fatalf("link tax config: %v", err)
+	}
+
+	in := &repository.PurchaseInput{
+		InvoiceNo:    "GSTR1-" + batchNo,
+		SupplierName: "GSTR1 Supplier",
+		StoreID:      &storeID,
+		Items: []repository.PurchaseItemInput{{
+			MedicineID:    m.ID,
+			BatchNumber:   batchNo,
+			ExpiryDate:    models.NewDate(time.Now().AddDate(2, 0, 0)),
+			Quantity:      qty,
+			PurchasePrice: float64(purchasePrice),
+			SalePrice:     float64(salePrice),
+		}},
+	}
+	if _, _, err := purchRepo.CreateInward(ctx, in); err != nil {
+		t.Fatalf("seed inward in store %s: %v", storeID, err)
+	}
+	batch, err := storeMedRepo.FindBatchByNumber(ctx, storeID, m.ID, batchNo)
+	if err != nil {
+		t.Fatalf("find batch: %v", err)
+	}
+	return m.ID, batch.ID
+}
+
+// seedHighValueMedicineInStore is the high-unit-price variant of
+// seedGSTMedicineInStore for B2CL threshold tests (qty 1 × 150000 × 1.12).
+func seedHighValueMedicineInStore(t *testing.T, storeID string) string {
+	t.Helper()
+	_, batchID := seedGSTMedicineInStore(t, storeID, "GSTR1 Surgical Kit", "GSTR1-HB1", 2000, 80000, 150000)
+	return batchID
+}
+
 // seedStoreWithGSTState27 creates a store linked to a state-27 GST registration
 // so inter/intra-state supply classification resolves the real seller state.
 func seedStoreWithGSTState27(t *testing.T) string {
@@ -213,8 +226,8 @@ func seedStoreWithGSTState27(t *testing.T) string {
 
 func TestBuildGSTR1_B2CLThreshold(t *testing.T) {
 	reset(t)
-	batchID := seedHighValueMedicine(t)
 	sid := seedStoreWithGSTState27(t)
+	batchID := seedHighValueMedicineInStore(t, sid)
 	ctx := context.Background()
 
 	// Inter-state B2C (no GSTIN), invoice value > Rs 1,00,000 (qty 1 x 150000 x 1.12 = 168000)
@@ -248,8 +261,8 @@ func TestBuildGSTR1_B2CLThreshold(t *testing.T) {
 
 func TestBuildGSTR1_B2CS_InterStateBelowThreshold(t *testing.T) {
 	reset(t)
-	_, batchID := seedGSTMedicine(t)
 	sid := seedStoreWithGSTState27(t)
+	_, batchID := seedGSTMedicineInStore(t, sid, "GSTR1 B2CS Med", "GSTR1-B2CS1", 100, 100, 150)
 	ctx := context.Background()
 
 	// Inter-state B2C below Rs 1,00,000 must be consolidated in B2CS as INTER,
@@ -291,7 +304,6 @@ func TestBuildGSTR1_B2CS_InterStateBelowThreshold(t *testing.T) {
 
 func TestBuildGSTR1_DocSeries(t *testing.T) {
 	reset(t)
-	_, batchID := seedGSTMedicine(t)
 	ctx := context.Background()
 
 	var sid string
@@ -300,6 +312,7 @@ func TestBuildGSTR1_DocSeries(t *testing.T) {
 		RETURNING id::text`).Scan(&sid); err != nil {
 		t.Fatalf("store: %v", err)
 	}
+	_, batchID := seedGSTMedicineInStore(t, sid, "GSTR1 Doc Med", "GSTR1-DOC1", 100, 100, 150)
 
 	for i := 0; i < 3; i++ {
 		if _, err := saleRepo.Checkout(ctx, &repository.CheckoutInput{

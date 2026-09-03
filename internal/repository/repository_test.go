@@ -11,7 +11,6 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/mohi/pms-marg-inspired/internal/database"
 	"github.com/mohi/pms-marg-inspired/internal/models"
 	"github.com/mohi/pms-marg-inspired/internal/repository"
 	"github.com/mohi/pms-marg-inspired/internal/testutil"
@@ -29,19 +28,11 @@ var (
 
 func TestMain(m *testing.M) {
 	ctx := context.Background()
-	url := os.Getenv("TEST_DATABASE_URL")
-	if url == "" {
-		url = "postgres://postgres:postgres@localhost:5432/pms_test?sslmode=disable"
-	}
 
 	var err error
-	pool, err = database.Connect(ctx, url)
+	pool, err = testutil.ConnectTestDB(ctx, "repository")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "connect test db: %v\n", err)
-		os.Exit(1)
-	}
-	if err := database.Migrate(ctx, pool); err != nil {
-		fmt.Fprintf(os.Stderr, "migrate: %v\n", err)
 		os.Exit(1)
 	}
 	if err := testutil.SeedStore(ctx, pool); err != nil {
@@ -49,8 +40,8 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 
-	medRepo = repository.NewMedicineRepo(pool, testutil.StoreID)
-	custRepo = repository.NewCustomerRepo(pool, testutil.StoreID)
+	medRepo = repository.NewMedicineRepo(pool)
+	custRepo = repository.NewCustomerRepo(pool)
 	saleRepo = repository.NewSaleRepo(pool)
 	purchRepo = repository.NewPurchaseRepo(pool)
 	reconRepo = repository.NewReconcileRepo(pool)
@@ -100,7 +91,7 @@ func seedFixture(t *testing.T, stock int, creditLimit float64) fixture {
 	m := &models.Medicine{Name: "Test Paracetamol 500mg",
 		SaltComposition: "Paracetamol 500mg", Manufacturer: "TestPharma",
 		MinReorderLevel: 10}
-	if err := medRepo.Create(ctx, m); err != nil {
+	if err := medRepo.Create(ctx, testutil.StoreID, m); err != nil {
 		t.Fatalf("create medicine: %v", err)
 	}
 
@@ -121,13 +112,13 @@ func seedFixture(t *testing.T, stock int, creditLimit float64) fixture {
 		t.Fatalf("inward: %v", err)
 	}
 
-	batch, err := medRepo.FindBatchByNumber(ctx, m.ID, "FIX-B1")
+	batch, err := medRepo.FindBatchByNumber(ctx, testutil.StoreID, m.ID, "FIX-B1")
 	if err != nil {
 		t.Fatalf("find batch: %v", err)
 	}
 
 	c := &models.Customer{Name: "Test Customer", Phone: fmt.Sprintf("+9198%07d", time.Now().UnixNano()%10000000), CreditLimit: creditLimit, CustomerType: "B2C"}
-	if err := custRepo.Create(ctx, c); err != nil {
+	if err := custRepo.Create(ctx, testutil.StoreID, c); err != nil {
 		t.Fatalf("create customer: %v", err)
 	}
 	return fixture{MedicineID: m.ID, BatchIDs: []string{batch.ID}, CustomerID: c.ID}
@@ -152,7 +143,7 @@ func TestCheckoutDecrementsBatchStock(t *testing.T) {
 		t.Errorf("items mismatch: %+v", res.Items)
 	}
 
-	batch, _ := medRepo.FindBatchByNumber(context.Background(), fx.MedicineID, "FIX-B1")
+	batch, _ := medRepo.FindBatchByNumber(context.Background(), testutil.StoreID, fx.MedicineID, "FIX-B1")
 	if batch.CurrentStock != 70 {
 		t.Errorf("stock after sale = %d want 70", batch.CurrentStock)
 	}
@@ -225,7 +216,7 @@ func TestCheckoutConcurrencyNeverNegativeStock(t *testing.T) {
 		t.Fatalf("unexpected concurrent checkout failure: %v", err)
 	}
 
-	batch, _ := medRepo.FindBatchByNumber(context.Background(), fx.MedicineID, "FIX-B1")
+	batch, _ := medRepo.FindBatchByNumber(context.Background(), testutil.StoreID, fx.MedicineID, "FIX-B1")
 	if batch.CurrentStock != 0 {
 		t.Errorf("oversold: stock = %d want exactly 0 (demand 180 > supply 100)", batch.CurrentStock)
 	}
@@ -244,7 +235,7 @@ func TestCreditLimitEnforced(t *testing.T) {
 	reset(t)
 	fx := seedFixture(t, 500, 100)
 
-	customer, err := custRepo.GetByID(context.Background(), fx.CustomerID)
+	customer, err := custRepo.GetByID(context.Background(), testutil.StoreID, fx.CustomerID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -262,11 +253,11 @@ func TestCreditLimitEnforced(t *testing.T) {
 		t.Fatalf("credit over limit must fail with CreditLimitExceededError, got %v", err)
 	}
 
-	customer, _ = custRepo.GetByID(context.Background(), fx.CustomerID)
+	customer, _ = custRepo.GetByID(context.Background(), testutil.StoreID, fx.CustomerID)
 	if customer.CurrentBalance != 0 {
 		t.Errorf("rejected credit sale mutated balance: %.2f", customer.CurrentBalance)
 	}
-	batch, _ := medRepo.FindBatchByNumber(context.Background(), fx.MedicineID, "FIX-B1")
+	batch, _ := medRepo.FindBatchByNumber(context.Background(), testutil.StoreID, fx.MedicineID, "FIX-B1")
 	if batch.CurrentStock != 500 {
 		t.Errorf("rejected credit sale mutated stock: %d", batch.CurrentStock)
 	}
@@ -294,7 +285,7 @@ func TestCreditLimitEnforced(t *testing.T) {
 		t.Fatalf("sale past accumulated balance must fail, got %v", err)
 	}
 
-	customer, _ = custRepo.GetByID(context.Background(), fx.CustomerID)
+	customer, _ = custRepo.GetByID(context.Background(), testutil.StoreID, fx.CustomerID)
 	if customer.CurrentBalance != 90 {
 		t.Errorf("balance = %.2f want 90.00", customer.CurrentBalance)
 	}
@@ -342,7 +333,7 @@ func TestPurchaseInwardMergesSameBatchNumber(t *testing.T) {
 		t.Fatalf("items = %d want 1", len(items))
 	}
 
-	batch, _ := medRepo.FindBatchByNumber(context.Background(), fx.MedicineID, "FIX-B1")
+	batch, _ := medRepo.FindBatchByNumber(context.Background(), testutil.StoreID, fx.MedicineID, "FIX-B1")
 	if batch.CurrentStock != 125 {
 		t.Errorf("merged stock = %d want 125", batch.CurrentStock)
 	}
@@ -391,7 +382,7 @@ func TestPurchaseInwardCreatesNewMedicineInline(t *testing.T) {
 		t.Fatalf("items mismatch: %+v", items)
 	}
 
-	m, err := medRepo.GetByID(context.Background(), items[0].MedicineID)
+	m, err := medRepo.GetByID(context.Background(), testutil.StoreID, items[0].MedicineID)
 	if err != nil {
 		t.Fatalf("medicine not registered by inward: %v", err)
 	}
@@ -400,7 +391,7 @@ func TestPurchaseInwardCreatesNewMedicineInline(t *testing.T) {
 		t.Errorf("registered medicine fields wrong: %+v", m)
 	}
 
-	batch, err := medRepo.FindBatchByNumber(context.Background(), m.ID, "AZ-500-A1")
+	batch, err := medRepo.FindBatchByNumber(context.Background(), testutil.StoreID, m.ID, "AZ-500-A1")
 	if err != nil {
 		t.Fatalf("batch not stocked: %v", err)
 	}
@@ -456,7 +447,7 @@ func TestPurchaseInwardBonusStock(t *testing.T) {
 		t.Fatalf("items mismatch: bonus_quantity=%d want 2", items[0].BonusQuantity)
 	}
 
-	batch, err := medRepo.FindBatchByNumber(context.Background(), fx.MedicineID, "BONUS-B1")
+	batch, err := medRepo.FindBatchByNumber(context.Background(), testutil.StoreID, fx.MedicineID, "BONUS-B1")
 	if err != nil {
 		t.Fatalf("find batch: %v", err)
 	}
@@ -496,7 +487,7 @@ func TestPurchaseInwardPerLineDiscount(t *testing.T) {
 		t.Errorf("line discount_amount = %.2f want 200.00", items[0].DiscountAmount)
 	}
 
-	batch, err := medRepo.FindBatchByNumber(context.Background(), fx.MedicineID, "DISC-B1")
+	batch, err := medRepo.FindBatchByNumber(context.Background(), testutil.StoreID, fx.MedicineID, "DISC-B1")
 	if err != nil {
 		t.Fatalf("find batch: %v", err)
 	}
@@ -574,7 +565,7 @@ func TestReconcileCorrectsStockAndLeavesSalesHistoryIntact(t *testing.T) {
 		t.Error("journal not persisted")
 	}
 
-	batch, _ := medRepo.FindBatchByNumber(context.Background(), fx.MedicineID, "FIX-B1")
+	batch, _ := medRepo.FindBatchByNumber(context.Background(), testutil.StoreID, fx.MedicineID, "FIX-B1")
 	if batch.CurrentStock != 55 {
 		t.Errorf("stock not force-corrected: %d want 55", batch.CurrentStock)
 	}
@@ -692,6 +683,11 @@ func errorsAs(err error, target any) bool {
 	case **models.CreditLimitExceededError:
 		if ce, ok := err.(*models.CreditLimitExceededError); ok {
 			*e = ce
+			return true
+		}
+	case **models.ValidationError:
+		if ve, ok := err.(*models.ValidationError); ok {
+			*e = ve
 			return true
 		}
 	}

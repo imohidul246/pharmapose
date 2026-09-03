@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -118,6 +120,7 @@ type lineResult struct {
 	netPrice         float64
 	taxLine          *tax.TaxLineResult
 	hsnCode          string
+	uqc              string
 	priceIncludesTax bool
 }
 
@@ -192,23 +195,27 @@ func (r *PurchaseRepo) createInwardTx(ctx context.Context, tx pgx.Tx, in *Purcha
 	}
 	supplyType = tax.DetermineSupplyType(storeStateCode, posStateCode)
 
-	total := 0.0
+	totalD := decimal.Zero
 	for i := range in.Items {
 		it := in.Items[i]
 		gross := float64(it.Quantity) * it.PurchasePrice
 		discAmount, discType, discValue := lineDiscount(gross, &LineDiscount{Type: it.DiscountType, Value: it.DiscountValue})
-		net := round2(gross - discAmount)
-		total = round2(total + net)
+		netD := tax.RoundMoney(decimal.NewFromFloat(gross).Sub(decimal.NewFromFloat(discAmount)))
+		totalD = tax.RoundMoney(totalD.Add(netD))
 
 		// Effective per-unit purchase price after discount (for batch storage).
 		// Uses blended cost: total paid / total received (including bonus).
+		// Inventory valuation only — GST tax base strictly uses the billed
+		// PurchasePrice (see fillTaxLine), never this blended price.
 		totalReceived := it.Quantity + it.BonusQuantity
 		effectivePrice := it.PurchasePrice
 		if totalReceived > 0 {
 			if discAmount > 0 {
-				effectivePrice = round2((gross - discAmount) / float64(totalReceived))
+				effD := tax.RoundMoney(decimal.NewFromFloat(gross).Sub(decimal.NewFromFloat(discAmount)).Div(decimal.NewFromInt(int64(totalReceived))))
+				effectivePrice, _ = effD.Float64()
 			} else if it.BonusQuantity > 0 {
-				effectivePrice = round2(gross / float64(totalReceived))
+				effD := tax.RoundMoney(decimal.NewFromFloat(gross).Div(decimal.NewFromInt(int64(totalReceived))))
+				effectivePrice, _ = effD.Float64()
 			}
 		}
 
@@ -236,7 +243,8 @@ func (r *PurchaseRepo) createInwardTx(ctx context.Context, tx pgx.Tx, in *Purcha
 
 		lineResults = append(lineResults, lr)
 	}
-	total = round2(total - in.DiscountTotal)
+	totalD = tax.RoundMoney(totalD.Sub(decimal.NewFromFloat(in.DiscountTotal)))
+	total, _ := totalD.Float64()
 
 	var (
 		po    models.PurchaseOrder
@@ -248,11 +256,13 @@ func (r *PurchaseRepo) createInwardTx(ctx context.Context, tx pgx.Tx, in *Purcha
 	// very first inward both creates the catalogue entry and stocks it.
 	resolved := make([]lineResult, len(lineResults))
 	copy(resolved, lineResults)
+	createdMeds := make(map[string]string)
 	for i := range resolved {
 		lr := &resolved[i]
 		it := &lr.input
 		if it.MedicineID != "" {
 			var exists bool
+			var medUQC *string
 			if err := tx.QueryRow(ctx,
 				`SELECT EXISTS(SELECT 1 FROM medicines WHERE id = $1 AND store_id = $2 AND deleted_at IS NULL)`,
 				it.MedicineID, storeID).Scan(&exists); err != nil {
@@ -260,6 +270,32 @@ func (r *PurchaseRepo) createInwardTx(ctx context.Context, tx pgx.Tx, in *Purcha
 			}
 			if !exists {
 				return nil, nil, fmt.Errorf("medicine %s not found", it.MedicineID)
+			}
+			// Snapshot the medicine's UQC for the purchase line item.
+			if err := tx.QueryRow(ctx,
+				`SELECT uqc FROM medicines WHERE id = $1 AND store_id = $2`,
+				it.MedicineID, storeID).Scan(&medUQC); err == nil && medUQC != nil && *medUQC != "" {
+				lr.uqc = *medUQC
+			} else if lr.uqc == "" {
+				lr.uqc = "OTH"
+			}
+			continue
+		}
+		key := strings.ToLower(strings.TrimSpace(it.MedicineName))
+		if existingID, ok := createdMeds[key]; ok {
+			it.MedicineID = existingID
+			var reuseUQC string
+			if err := tx.QueryRow(ctx, `SELECT COALESCE(uqc,'OTH') FROM medicines WHERE id = $1`, existingID).Scan(&reuseUQC); err == nil && reuseUQC != "" {
+				lr.uqc = reuseUQC
+			} else if lr.uqc == "" {
+				lr.uqc = "OTH"
+			}
+			if err := r.taxLineFromTx(ctx, tx, storeID, invoiceDate, supplyType, lr); err != nil {
+				return nil, nil, err
+			}
+			if lr.taxLine != nil {
+				hasTaxConfig = true
+				lastPriceIncludesTax = lr.priceIncludesTax
 			}
 			continue
 		}
@@ -273,7 +309,15 @@ func (r *PurchaseRepo) createInwardTx(ctx context.Context, tx pgx.Tx, in *Purcha
 		).Scan(&newID); err != nil {
 			return nil, nil, err
 		}
+		createdMeds[key] = newID
 		it.MedicineID = newID
+		// Snapshot UQC for the newly registered medicine (defaults to NOS).
+		var newUQC string
+		if err := tx.QueryRow(ctx, `SELECT COALESCE(uqc,'OTH') FROM medicines WHERE id = $1`, newID).Scan(&newUQC); err == nil && newUQC != "" {
+			lr.uqc = newUQC
+		} else if lr.uqc == "" {
+			lr.uqc = "OTH"
+		}
 
 		// If an HSN code is provided, classify the new medicine and link
 		// it to the HSN's active tax rate. All of this happens on the same
@@ -332,7 +376,8 @@ func (r *PurchaseRepo) createInwardTx(ctx context.Context, tx pgx.Tx, in *Purcha
 	}
 	chargeableTotal := total
 	if invoiceResult != nil {
-		chargeableTotal, _ = invoiceResult.GrandTotal.Float64()
+		grandTotal, _ := invoiceResult.GrandTotal.Float64()
+		chargeableTotal = math.Max(0, grandTotal-in.DiscountTotal)
 	}
 
 	itcEligible := true
@@ -388,7 +433,7 @@ func (r *PurchaseRepo) createInwardTx(ctx context.Context, tx pgx.Tx, in *Purcha
 		ig, igOK := invoiceResult.IGSTTotal.Float64()
 		ce, ceOK := invoiceResult.CessTotal.Float64()
 		tax, taxOK := invoiceResult.TaxTotal.Float64()
-		gt, gtOK := invoiceResult.GrandTotal.Float64()
+		_, gtOK := invoiceResult.GrandTotal.Float64()
 		if gfOK {
 			po.GrossAmount = &gf
 		}
@@ -411,7 +456,8 @@ func (r *PurchaseRepo) createInwardTx(ctx context.Context, tx pgx.Tx, in *Purcha
 			po.TaxTotal = &tax
 		}
 		if gtOK {
-			po.GrandTotal = &gt
+			ct := chargeableTotal
+			po.GrandTotal = &ct
 		}
 		itc := itcAmount
 		po.ITCAmount = &itc
@@ -443,21 +489,25 @@ func (r *PurchaseRepo) createInwardTx(ctx context.Context, tx pgx.Tx, in *Purcha
 		}
 
 		var itemID string
+		uqc := lr.uqc
+		if uqc == "" {
+			uqc = "OTH"
+		}
 		if err := tx.QueryRow(ctx, `
 			INSERT INTO purchase_order_items
 				(purchase_id, medicine_id, batch_number, expiry_date, quantity, bonus_quantity,
 				 purchase_price, sale_price, discount_type, discount_value, discount_amount,
-				 hsn_code, gross_amount, taxable_value, gst_rate,
+				 hsn_code, uqc, gross_amount, taxable_value, gst_rate,
 				 cgst_rate, cgst_amount, sgst_rate, sgst_amount,
 				 igst_rate, igst_amount, cess_rate, cess_amount, line_total)
 			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
-			        $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)
+			        $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25)
 			RETURNING id::text`,
 			po.ID, it.MedicineID, it.BatchNumber, it.ExpiryDate.Time,
 			it.Quantity, it.BonusQuantity,
 			it.PurchasePrice, it.SalePrice,
 			lr.discType, lr.discVal, lr.discAmt,
-			sqlStr(&lr.hsnCode), derefFloatPtrTax(lr.taxLine, "GrossAmount"),
+			sqlStr(&lr.hsnCode), uqc, derefFloatPtrTax(lr.taxLine, "GrossAmount"),
 			derefFloatPtrTax(lr.taxLine, "TaxableValue"), derefFloatPtrTax(lr.taxLine, "GSTRate"),
 			derefFloatPtrTax(lr.taxLine, "CGSTRate"), derefFloatPtrTax(lr.taxLine, "CGSTAmount"),
 			derefFloatPtrTax(lr.taxLine, "SGSTRate"), derefFloatPtrTax(lr.taxLine, "SGSTAmount"),
@@ -481,6 +531,7 @@ func (r *PurchaseRepo) createInwardTx(ctx context.Context, tx pgx.Tx, in *Purcha
 			DiscountType:   lr.discType,
 			DiscountValue:  lr.discVal,
 			DiscountAmount: lr.discAmt,
+			UQC:            uqc,
 		}
 		if lr.taxLine != nil {
 			grossF, _ := lr.taxLine.GrossAmount.Float64()
@@ -549,10 +600,14 @@ func (r *PurchaseRepo) taxLineFromTx(ctx context.Context, tx pgx.Tx, storeID str
 func fillTaxLine(lr *lineResult, cfg *models.MedicineTaxConfig, supplyType tax.SupplyType) {
 	lr.hsnCode = cfg.HSNCode
 	lr.priceIncludesTax = cfg.PriceIncludesTax
+	// GST valuation: tax applies to the transaction value of billed goods
+	// only (quantity x pre-bonus PurchasePrice less discount). The blended
+	// effectivePrice (incl. bonus) is for inventory valuation and MUST NOT
+	// enter the tax engine.
 	taxInput := tax.TaxInput{
-		Quantity:         decimal.NewFromInt(int64(lr.input.Quantity)),
-		UnitPrice:        decimal.NewFromFloat(lr.input.PurchasePrice),
-		DiscountAmount:   decimal.NewFromFloat(lr.discAmt),
+		Quantity:       decimal.NewFromInt(int64(lr.input.Quantity)),
+		UnitPrice:      decimal.NewFromFloat(lr.input.PurchasePrice),
+		DiscountAmount: decimal.NewFromFloat(lr.discAmt),
 		TaxRate: tax.TaxRate{
 			GSTRate:  decimal.NewFromFloat(cfg.TaxRate.GSTRate),
 			CGSTRate: decimal.NewFromFloat(cfg.TaxRate.CGSTRate),

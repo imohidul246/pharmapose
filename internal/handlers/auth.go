@@ -14,11 +14,14 @@ import (
 // responsePrincipal is the shape of GET /api/auth/me and the login/register
 // responses: everything the SPA needs to render, in one round trip.
 type responsePrincipal struct {
-	ID          string   `json:"id"`
-	Name        string   `json:"name"`
-	Role        string   `json:"role"`
-	StoreID     string   `json:"store_id"`
-	Permissions []string `json:"permissions"`
+	ID                     string   `json:"id"`
+	Name                   string   `json:"name"`
+	Role                   string   `json:"role"`
+	StoreID                string   `json:"store_id"`
+	Permissions            []string `json:"permissions"`
+	IsPlatformAdmin        bool     `json:"is_platform_admin"`
+	SubscriptionValidUntil *string  `json:"subscription_valid_until,omitempty"`
+	SubscriptionStatus     string   `json:"subscription_status,omitempty"`
 }
 
 func toResponsePrincipal(p *auth.Principal) responsePrincipal {
@@ -28,7 +31,27 @@ func toResponsePrincipal(p *auth.Principal) responsePrincipal {
 			perms = append(perms, string(perm))
 		}
 	}
-	return responsePrincipal{ID: p.UserID, Name: p.Name, Role: string(p.Role), StoreID: p.StoreID, Permissions: perms}
+	return responsePrincipal{ID: p.UserID, Name: p.Name, Role: string(p.Role), StoreID: p.StoreID, Permissions: perms, IsPlatformAdmin: p.IsPlatformAdmin}
+}
+
+// enrichPrincipal attaches the store subscription window to the principal
+// payload so the SPA can render expiry warnings without an extra round trip.
+// Platform admins and principals without a store keep empty subscription fields.
+func (d *Deps) enrichPrincipal(c *gin.Context, rp responsePrincipal, p *auth.Principal) responsePrincipal {
+	rp.IsPlatformAdmin = p.IsPlatformAdmin
+	if p.IsPlatformAdmin || p.StoreID == "" {
+		return rp
+	}
+	status, validUntil, err := d.AuthRepo.GetStoreSubscription(c.Request.Context(), p.StoreID)
+	if err != nil {
+		return rp
+	}
+	rp.SubscriptionStatus = status
+	if validUntil != nil {
+		s := validUntil.UTC().Format("2006-01-02T15:04:05Z07:00")
+		rp.SubscriptionValidUntil = &s
+	}
+	return rp
 }
 
 // POST /api/auth/register — bootstraps a brand-new tenant (owner login +
@@ -91,7 +114,7 @@ func (d *Deps) register(c *gin.Context) {
 	}
 
 	http.SetCookie(c.Writer, auth.SessionCookieValue(rawToken, d.CookieOptions))
-	c.JSON(http.StatusOK, gin.H{"user": res.User, "principal": toResponsePrincipal(res.Principal)})
+	c.JSON(http.StatusOK, gin.H{"user": res.User, "principal": d.enrichPrincipal(c, toResponsePrincipal(res.Principal), res.Principal)})
 }
 
 // POST /api/auth/login
@@ -120,6 +143,18 @@ func (d *Deps) login(c *gin.Context) {
 	}
 	if !user.IsActive {
 		respondError(c, http.StatusUnauthorized, "account is disabled")
+		return
+	}
+	// Subscription gate: expired or suspended stores cannot log in (platform
+	// admins bypass). Checked before a session row is created so a blocked
+	// store never mints a live token.
+	if err := d.AuthRepo.CheckStoreSubscriptionForUser(c.Request.Context(), user); err != nil {
+		var valErr *models.ValidationError
+		if errors.As(err, &valErr) {
+			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "subscription_expired", "message": valErr.Error()})
+			return
+		}
+		respondInternal(c, err)
 		return
 	}
 
@@ -154,7 +189,7 @@ func (d *Deps) me(c *gin.Context) {
 		respondError(c, http.StatusUnauthorized, auth.ErrUnauthorized.Error())
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"user": user, "principal": toResponsePrincipal(p)})
+	c.JSON(http.StatusOK, gin.H{"user": user, "principal": d.enrichPrincipal(c, toResponsePrincipal(p), p)})
 }
 
 // POST /api/auth/logout
@@ -218,5 +253,5 @@ func (d *Deps) emitPrincipal(c *gin.Context, tokenHash string) {
 		respondInternal(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"principal": toResponsePrincipal(p)})
+	c.JSON(http.StatusOK, gin.H{"principal": d.enrichPrincipal(c, toResponsePrincipal(p), p)})
 }

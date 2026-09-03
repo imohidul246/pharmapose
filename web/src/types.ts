@@ -637,7 +637,46 @@ export interface Store {
   gstin?: string | null
   pan?: string | null
   state_code?: string | null
+  subscription_valid_until?: string | null
+  subscription_status?: string
 }
+
+// ---- Platform administration (offline cash subscriptions) ----
+
+export type SubscriptionPlanType = '1_MONTH' | '6_MONTHS' | '1_YEAR'
+
+export type SubscriptionStatus = 'ACTIVE' | 'SUSPENDED'
+
+export interface PlatformStoreInfo {
+  store_id: string
+  store_name: string
+  store_address: string
+  store_phone: string
+  is_active: boolean
+  owner_name?: string
+  owner_phone?: string
+  subscription_valid_until: string | null
+  subscription_status: SubscriptionStatus
+  days_remaining: number | null
+  created_at: string
+}
+
+export interface SubscriptionPayment {
+  id: string
+  store_id: string
+  plan_type: SubscriptionPlanType
+  amount: number
+  valid_from: string
+  valid_until: string
+  notes?: string
+  created_at: string
+}
+
+export const SUBSCRIPTION_PLANS: { plan_type: SubscriptionPlanType; label: string; amount: number; days: number }[] = [
+  { plan_type: '1_MONTH', label: '1 Month', amount: 250, days: 30 },
+  { plan_type: '6_MONTHS', label: '6 Months', amount: 1350, days: 180 },
+  { plan_type: '1_YEAR', label: '1 Year', amount: 2500, days: 365 },
+]
 
 // ---- Auth & roles ----
 
@@ -660,6 +699,9 @@ export interface Principal {
   role: Role
   store_id: string
   permissions: Permission[]
+  is_platform_admin?: boolean
+  subscription_valid_until?: string | null
+  subscription_status?: string
 }
 
 export interface AuthUser {
@@ -667,6 +709,7 @@ export interface AuthUser {
   name: string
   phone: string
   is_active: boolean
+  is_platform_admin?: boolean
   created_at: string
   updated_at: string
 }

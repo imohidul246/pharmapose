@@ -34,7 +34,7 @@ func seedCustomer(t *testing.T, c *models.Customer) *models.Customer {
 	if c.CustomerType == "" {
 		c.CustomerType = "B2C"
 	}
-	if err := custRepo.Create(context.Background(), c); err != nil {
+	if err := custRepo.Create(context.Background(), testutil.StoreID, c); err != nil {
 		t.Fatalf("create customer %q: %v", c.Name, err)
 	}
 	return c
@@ -48,7 +48,7 @@ func TestCustomerSearchByName(t *testing.T) {
 	seedCustomer(t, &models.Customer{Name: "Gadget General Store", Phone: uniquePhone("20"), CustomerType: "B2C"})
 	seedCustomer(t, &models.Customer{Name: "Sunrise Medico", Phone: uniquePhone("30"), CustomerType: "B2C"})
 
-	got, err := custRepo.ListFiltered(ctx, "widget", "", 20)
+	got, err := custRepo.ListFiltered(ctx, testutil.StoreID, "widget", "", 20)
 	if err != nil {
 		t.Fatalf("search: %v", err)
 	}
@@ -56,7 +56,7 @@ func TestCustomerSearchByName(t *testing.T) {
 		t.Errorf("search 'widget' = %+v want [Widget Wholesale]", got)
 	}
 
-	got, err = custRepo.ListFiltered(ctx, "MEDICO", "", 20)
+	got, err = custRepo.ListFiltered(ctx, testutil.StoreID, "MEDICO", "", 20)
 	if err != nil {
 		t.Fatalf("search: %v", err)
 	}
@@ -73,7 +73,7 @@ func TestCustomerSearchByPhone(t *testing.T) {
 	seedCustomer(t, &models.Customer{Name: "Phone Seeker", Phone: phone, CustomerType: "B2C"})
 
 	// Search by a distinctive digit run within the phone number.
-	got, err := custRepo.ListFiltered(ctx, "55", "", 20)
+	got, err := custRepo.ListFiltered(ctx, testutil.StoreID, "55", "", 20)
 	if err != nil {
 		t.Fatalf("search by phone: %v", err)
 	}
@@ -91,7 +91,7 @@ func TestCustomerSearchByGSTIN(t *testing.T) {
 	seedCustomer(t, &models.Customer{Name: "Mumbai Trading Branch", Phone: uniquePhone("61"), CustomerType: "B2B", GSTIN: &gstinMH})
 	seedCustomer(t, &models.Customer{Name: "Bangalore Wholesale", Phone: uniquePhone("62"), CustomerType: "B2B", GSTIN: &gstinKA})
 
-	got, err := custRepo.ListFiltered(ctx, "AAPBC1234F1Z", "", 20)
+	got, err := custRepo.ListFiltered(ctx, testutil.StoreID, "AAPBC1234F1Z", "", 20)
 	if err != nil {
 		t.Fatalf("search by gstin: %v", err)
 	}
@@ -99,7 +99,7 @@ func TestCustomerSearchByGSTIN(t *testing.T) {
 		t.Fatalf("search by gstin = %d rows want 3: %+v", len(got), got)
 	}
 
-	got, err = custRepo.ListFiltered(ctx, gstinKA, "", 20)
+	got, err = custRepo.ListFiltered(ctx, testutil.StoreID, gstinKA, "", 20)
 	if err != nil {
 		t.Fatalf("search by full gstin: %v", err)
 	}
@@ -115,7 +115,7 @@ func TestCustomerSearchTypeFilter(t *testing.T) {
 	seedCustomer(t, &models.Customer{Name: "Alpha Retail", Phone: uniquePhone("70"), CustomerType: "B2C"})
 	seedCustomer(t, &models.Customer{Name: "Alpha Wholesale", Phone: uniquePhone("71"), CustomerType: "B2B"})
 
-	got, err := custRepo.ListFiltered(ctx, "Alpha", "B2B", 20)
+	got, err := custRepo.ListFiltered(ctx, testutil.StoreID, "Alpha", "B2B", 20)
 	if err != nil {
 		t.Fatalf("search: %v", err)
 	}
@@ -123,7 +123,7 @@ func TestCustomerSearchTypeFilter(t *testing.T) {
 		t.Errorf("type-filtered search = %+v want [Alpha Wholesale]", got)
 	}
 
-	got, err = custRepo.ListFiltered(ctx, "Alpha", "B2C", 20)
+	got, err = custRepo.ListFiltered(ctx, testutil.StoreID, "Alpha", "B2C", 20)
 	if err != nil {
 		t.Fatalf("search: %v", err)
 	}
@@ -140,7 +140,7 @@ func TestCustomerSearchTypeBehindBackwardCompatible(t *testing.T) {
 		seedCustomer(t, &models.Customer{Name: fmt.Sprintf("Backward %02d", i), Phone: uniquePhone("80"), CustomerType: "B2C"})
 	}
 
-	val, err := custRepo.ListFiltered(ctx, "", "B2C", 5)
+	val, err := custRepo.ListFiltered(ctx, testutil.StoreID, "", "B2C", 5)
 	if err != nil {
 		t.Fatalf("search: %v", err)
 	}
@@ -209,11 +209,11 @@ func TestCreditSaleToNewlyCreatedCustomerWritesLedger(t *testing.T) {
 		t.Fatalf("credit sale to new customer: %v", err)
 	}
 
-	cust, _ := custRepo.GetByID(ctx, c.ID)
+	cust, _ := custRepo.GetByID(ctx, testutil.StoreID, c.ID)
 	if cust.CurrentBalance != res.Invoice.TotalAmount {
 		t.Errorf("balance %.2f != invoice %.2f", cust.CurrentBalance, res.Invoice.TotalAmount)
 	}
-	entries, err := custRepo.Ledger(ctx, c.ID, 0)
+	entries, err := custRepo.Ledger(ctx, testutil.StoreID, c.ID, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

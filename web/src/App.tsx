@@ -14,7 +14,9 @@ import Approvals from './pages/Approvals'
 import Employees from './pages/Employees'
 import StoreSettings from './pages/StoreSettings'
 import Login from './pages/Login'
+import PlatformAdmin from './pages/PlatformAdmin'
 import AccountChip from './components/AccountChip'
+import SubscriptionBanner from './components/SubscriptionBanner'
 
 type Tab =
   | 'pos'
@@ -87,6 +89,50 @@ function Gate() {
 function Workspace() {
   const { session: maybeSession } = useAuth()
   const session = maybeSession!
+  // Platform admins operate above any tenant: they get the admin dashboard
+  // instead of the store counter workspace.
+  if (session.principal.is_platform_admin) {
+    return <PlatformWorkspace />
+  }
+  return <StoreWorkspace session={session} />
+}
+
+function PlatformWorkspace() {
+  return (
+    <div className="min-h-screen">
+      <header className="no-print sticky top-0 z-20 bg-pine-950 text-white shadow-lg shadow-pine-950/20">
+        <div className="mx-auto flex max-w-[1400px] flex-wrap items-center gap-x-5 gap-y-2 px-4 py-2.5 lg:px-6">
+          <div className="flex items-center gap-2.5">
+            <span
+              aria-hidden
+              className="flex h-8 w-8 items-center justify-center rounded-lg bg-pine-700 font-display text-lg font-black text-mint-100"
+            >
+              ℞
+            </span>
+            <div className="leading-none">
+              <p className="font-display text-[17px] font-black uppercase tracking-tight">
+                PharmaPOS · Platform
+              </p>
+              <p className="mt-0.5 text-[10px] font-semibold uppercase tracking-[0.22em] text-mint-300/70">
+                Super-admin console
+              </p>
+            </div>
+          </div>
+          <div className="ml-auto flex items-center gap-2.5 text-xs">
+            <div className="relative">
+              <AccountChip />
+            </div>
+          </div>
+        </div>
+      </header>
+      <main className="page-enter mx-auto max-w-[1400px] px-4 py-6 lg:px-6">
+        <PlatformAdmin />
+      </main>
+    </div>
+  )
+}
+
+function StoreWorkspace({ session }: { session: NonNullable<ReturnType<typeof useAuth>['session']> }) {
   const [tab, setTab] = useState<Tab>('pos')
   const [sync, setSync] = useState<SyncState>({ status: 'idle' })
   const firstSync = useRef(false)
@@ -146,6 +192,7 @@ function Workspace() {
 
   return (
     <div className="min-h-screen">
+      <SubscriptionBanner />
       <header className="no-print sticky top-0 z-20 bg-pine-950 text-white shadow-lg shadow-pine-950/20">
         <div className="mx-auto flex max-w-[1400px] flex-wrap items-center gap-x-5 gap-y-2 px-4 py-2.5 lg:px-6">
           {/* Brand */}

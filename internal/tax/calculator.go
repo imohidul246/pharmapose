@@ -64,23 +64,38 @@ func CalculateLineTax(in TaxInput) TaxLineResult {
 		cessAmount = RoundMoney(cessAmount)
 	}
 
-	// Split tax into components based on supply type
+	// Split tax into components based on supply type. All component math runs
+	// on integer paise with banker's rounding (see rounding.go): the taxable
+	// value converts losslessly to paise, CGST is computed first at half rate,
+	// and SGST mirrors it exactly so CGST == SGST down to the single paisa.
 	cgstRate, sgstRate, igstRate := SplitTaxComponents(in.TaxRate.GSTRate, in.SupplyType)
 
 	cgstAmount := zero
 	sgstAmount := zero
 	igstAmount := zero
 
+	gstRateF := in.TaxRate.GSTRate.InexactFloat64()
+	taxablePaise := ToPaise(taxableValue)
 	if in.SupplyType == SupplyTypeInterState {
-		igstAmount = taxAmount
+		igstAmount = FromPaise(IGSTPaise(taxablePaise, gstRateF))
+		taxAmount = igstAmount
 	} else {
-		// Intra-state: split equally between CGST and SGST. CGST is rounded to
-		// two decimals and SGST takes the remaining paise so the sum of the two
-		// always equals the line tax exactly (preserving MRP exactness).
-		cgstAmount = taxAmount.Div(two)
-		cgstAmount = RoundMoney(cgstAmount)
-		sgstAmount = taxAmount.Sub(cgstAmount)
-		sgstAmount = RoundMoney(sgstAmount)
+		// Intra-state: CGST MUST equal SGST exactly (GSTN portal rejects
+		// asymmetric splits).
+		//
+		//   cgstPaise := RoundHalfEven(taxablePaise * (gstRate/2) / 100)
+		//   sgstPaise := cgstPaise // strictly mirrored
+		//   total     := cgstPaise + sgstPaise
+		//
+		// Never round the total first and split it, and never round CGST and
+		// SGST independently — both produce 1p asymmetries on odd-paisa taxes
+		// (e.g. Rs 13.75 @ 5% -> 0.34/0.35) that the portal rejects. The total
+		// here may differ from Round(taxable*rate/100) by 1p on such ties;
+		// symmetry is the statutory requirement and takes precedence.
+		cgstP, sgstP, totalP := SplitIntraStatePaise(taxablePaise, gstRateF)
+		cgstAmount = FromPaise(cgstP)
+		sgstAmount = FromPaise(sgstP)
+		taxAmount = FromPaise(totalP)
 	}
 
 	var lineTotal decimal.Decimal

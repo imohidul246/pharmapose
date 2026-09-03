@@ -116,7 +116,7 @@ func TestCreditCheckUsesDiscountedTotal(t *testing.T) {
 		t.Errorf("total=%.2f want 27.00", res.Invoice.TotalAmount)
 	}
 
-	cust, _ := custRepo.GetByID(context.Background(), cid)
+	cust, _ := custRepo.GetByID(context.Background(), testutil.StoreID, cid)
 	if cust.CurrentBalance != 27 {
 		t.Errorf("balance=%.2f want 27.00", cust.CurrentBalance)
 	}

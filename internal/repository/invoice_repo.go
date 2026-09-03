@@ -58,7 +58,7 @@ func (r *SaleRepo) ListInvoices(ctx context.Context, storeID string, start, end 
 		       si.grand_total::float8,
 		       si.tax_total::float8
 		FROM sales_invoices si
-		LEFT JOIN customers c ON c.id = si.customer_id
+		LEFT JOIN customers c ON c.id = si.customer_id AND c.store_id = si.store_id
 		LEFT JOIN sales_invoice_items sii ON sii.invoice_id = si.id
 		WHERE si.store_id = $1 AND si.invoice_date >= $2 AND si.invoice_date < $3
 		  AND ($4 = '' OR si.invoice_no LIKE '%' || $4 || '%')
@@ -107,7 +107,7 @@ func (r *SaleRepo) GetInvoice(ctx context.Context, storeID, id string) (*SalesIn
 		       si.invoice_date, si.financial_year,
 		       si.sale_type, si.buyer_name, si.buyer_gstin, si.buyer_address
 		FROM sales_invoices si
-		LEFT JOIN customers c ON c.id = si.customer_id
+		LEFT JOIN customers c ON c.id = si.customer_id AND c.store_id = si.store_id
 		WHERE si.id = $1 AND si.store_id = $2`, id, storeID).
 		Scan(&d.Invoice.ID, &d.Invoice.InvoiceNo, &customerID, &paymentType,
 			&d.Invoice.TotalAmount, &d.Invoice.DiscountTotal, &d.Invoice.CreatedAt,
@@ -135,7 +135,7 @@ func (r *SaleRepo) GetInvoice(ctx context.Context, storeID, id string) (*SalesIn
 		       sii.discount_type, sii.discount_value::float8, sii.discount_amount::float8,
 		       m.name, b.batch_number,
 		       sii.mrp::float8, sii.bonus_quantity,
-		       sii.hsn_code,
+		       sii.hsn_code, COALESCE(sii.uqc, 'OTH'),
 		       sii.gross_amount::float8, sii.taxable_value::float8, sii.gst_rate::float8,
 		       sii.cgst_rate::float8, sii.cgst_amount::float8,
 		       sii.sgst_rate::float8, sii.sgst_amount::float8,
@@ -159,7 +159,7 @@ func (r *SaleRepo) GetInvoice(ctx context.Context, storeID, id string) (*SalesIn
 			&it.DiscountType, &it.DiscountValue, &it.DiscountAmount,
 			&it.MedicineName, &it.BatchNumber,
 			&it.MRP, &it.BonusQuantity,
-			&it.HSNCode,
+			&it.HSNCode, &it.UQC,
 			&it.GrossAmount, &it.TaxableValue, &it.GSTRate,
 			&it.CGSTRate, &it.CGSTAmount,
 			&it.SGSTRate, &it.SGSTAmount,
@@ -264,7 +264,7 @@ func (r *PurchaseRepo) GetInvoice(ctx context.Context, storeID, id string) (*Pur
 		       poi.purchase_price::float8, poi.sale_price::float8,
 		       poi.discount_type, poi.discount_value::float8, poi.discount_amount::float8,
 		       m.name,
-		       poi.hsn_code,
+		       poi.hsn_code, COALESCE(poi.uqc, 'OTH'),
 		       poi.gross_amount::float8, poi.taxable_value::float8, poi.gst_rate::float8,
 		       poi.cgst_rate::float8, poi.cgst_amount::float8,
 		       poi.sgst_rate::float8, poi.sgst_amount::float8,
@@ -288,7 +288,7 @@ func (r *PurchaseRepo) GetInvoice(ctx context.Context, storeID, id string) (*Pur
 			&it.PurchasePrice, &it.SalePrice,
 			&it.DiscountType, &it.DiscountValue, &it.DiscountAmount,
 			&it.MedicineName,
-			&it.HSNCode,
+			&it.HSNCode, &it.UQC,
 			&it.GrossAmount, &it.TaxableValue, &it.GSTRate,
 			&it.CGSTRate, &it.CGSTAmount,
 			&it.SGSTRate, &it.SGSTAmount,

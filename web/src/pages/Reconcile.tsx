@@ -7,6 +7,7 @@ import type { ReconcileResultItem, StockAuditRequest } from '../types'
 
 interface Row {
   batchId: string
+  medicineId: string
   medicineName: string
   salt: string
   batchNumber: string
@@ -59,6 +60,7 @@ export default function Reconcile({
         medicines.flatMap((m) =>
           m.batches.map((b) => ({
             batchId: b.id,
+            medicineId: m.id,
             medicineName: m.name,
             salt: m.salt_composition,
             batchNumber: b.batch_number,
@@ -111,18 +113,24 @@ export default function Reconcile({
     setBusy(true)
     setError('')
     try {
-      const items = pending.map((r) => ({
-        batch_id: r.batchId,
-        physical_count: Number(r.physicalInput),
-        reason: r.reason.trim(),
-      }))
       if (isSubmit) {
+        const items = pending.map((r) => ({
+          medicine_id: r.medicineId,
+          batch_id: r.batchId,
+          physical_quantity: Number(r.physicalInput),
+          reason: r.reason.trim(),
+        }))
         await api.createStockAuditRequest(notes, items)
         setResult(null)
         setRows((prev) => prev.map((r) => ({ ...r, physicalInput: '', reason: '' })))
         setNotes('')
         await loadMyAudits()
       } else {
+        const items = pending.map((r) => ({
+          batch_id: r.batchId,
+          physical_count: Number(r.physicalInput),
+          reason: r.reason.trim(),
+        }))
         const res = await api.reconcile(items, notes)
         setResult({
           id: res.journal.id,

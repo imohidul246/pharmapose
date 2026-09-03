@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math"
-	"sort"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -61,9 +59,12 @@ type CheckoutResult struct {
 	Items   []models.SalesInvoiceItem `json:"items"`
 }
 
-// round2 clamps monetary math to two decimals to avoid float drift.
-func round2(v float64) float64 {
-	return math.Round(v*100) / 100
+// roundMoneyFloat is the single float64 rounding bridge for legacy float
+// amounts: banker's (round-half-even) to 2 decimals via the tax engine.
+// Prefer pure decimal.Decimal + tax.RoundMoney aggregation; use this only
+// when converting a final float for DB writes or comparisons.
+func roundMoneyFloat(v float64) float64 {
+	return tax.RoundMoney(decimal.NewFromFloat(v)).InexactFloat64()
 }
 
 func (in *CheckoutInput) validate() error {
@@ -171,20 +172,25 @@ func mergedItems(items []CheckoutItemInput) ([]CheckoutItemInput, error) {
 }
 
 // lineDiscount resolves the rupee concession for a line, clamped so the net
-// amount can never drop below zero.
+// amount can never drop below zero. Rounding is banker's (round-half-even)
+// via the tax engine so aggregations match GSTR-1.
 func lineDiscount(gross float64, d *LineDiscount) (amount float64, dtype string, dvalue float64) {
 	if d == nil || d.Value <= 0 || gross <= 0 {
 		return 0, "NONE", 0
 	}
+	grossD := decimal.NewFromFloat(gross)
+	var amtD decimal.Decimal
 	if d.Type == "percent" {
-		amount = gross * d.Value / 100
+		amtD = grossD.Mul(decimal.NewFromFloat(d.Value)).Div(decimal.NewFromInt(100))
 	} else {
-		amount = d.Value
+		amtD = decimal.NewFromFloat(d.Value)
 	}
-	if amount > gross {
-		amount = gross
+	if amtD.GreaterThan(grossD) {
+		amtD = grossD
 	}
-	return round2(amount), d.Type, d.Value
+	amtD = tax.RoundMoney(amtD)
+	f, _ := amtD.Float64()
+	return f, d.Type, d.Value
 }
 
 // Checkout executes the full sale atomically:
@@ -226,48 +232,79 @@ func (r *SaleRepo) checkout(ctx context.Context, in *CheckoutInput, when time.Ti
 
 	// The store is derived from the invoice input (validated at the handler
 	// against the authenticated principal); it scopes every tax/medicine lookup.
+	// An empty store is rejected outright so no query below can ever run
+	// unscoped across tenants (IDOR).
 	storeID := ""
 	if in.StoreID != nil {
 		storeID = *in.StoreID
 	}
+	if storeID == "" {
+		return nil, models.NewValidationError("store_id is required")
+	}
 
 	var result *CheckoutResult
 	err = pgx.BeginFunc(ctx, r.db, func(tx pgx.Tx) error {
-		batchIDs := make([]string, len(items))
-		for i, it := range items {
-			batchIDs[i] = it.BatchID
+		// Canonical lock hierarchy (deadlock safety + fail-fast):
+		// ALWAYS lock the parent/actor row (Customer) BEFORE the
+		// highly-contended inventory rows (Batches). The credit-limit
+		// check therefore runs before any batch lock or tax computation.
+		var custName string
+		var custLimit, custBalance float64
+		var custGSTIN *string
+		var custState *string
+		customerLocked := false
+		hasCustomerRow := false
+		if in.PaymentType == models.PaymentCredit {
+			if in.CustomerID == nil || *in.CustomerID == "" {
+				return models.NewValidationError("credit sale requires a customer")
+			}
+			row := tx.QueryRow(ctx, `
+				SELECT name, credit_limit::float8, current_balance::float8, gstin, state_code
+				FROM customers WHERE id = $1 AND store_id = $2
+				FOR UPDATE`, *in.CustomerID, storeID)
+			var gstinVal, stateVal *string
+			if err := row.Scan(&custName, &custLimit, &custBalance, &gstinVal, &stateVal); err != nil {
+				if errors.Is(err, pgx.ErrNoRows) {
+					return models.NewValidationError("customer does not belong to this store")
+				}
+				return err
+			}
+			custGSTIN, custState = gstinVal, stateVal
+			customerLocked = true
+			hasCustomerRow = true
+		} else if in.CustomerID != nil && *in.CustomerID != "" {
+			// Non-credit sale with a linked customer: read identity before
+			// batch locks to preserve Customer -> Batches ordering.
+			var gstinVal, stateVal *string
+			err := tx.QueryRow(ctx,
+				`SELECT gstin, state_code FROM customers WHERE id = $1 AND store_id = $2`,
+				*in.CustomerID, storeID).
+				Scan(&gstinVal, &stateVal)
+			if errors.Is(err, pgx.ErrNoRows) {
+				return models.NewValidationError("customer does not belong to this store")
+			}
+			if err != nil {
+				return err
+			}
+			custGSTIN, custState = gstinVal, stateVal
+			hasCustomerRow = true
 		}
-		sort.Strings(batchIDs)
+		_ = customerLocked
+		_ = hasCustomerRow
 
-		rows, err := tx.Query(ctx, `
-			SELECT b.id::text, b.medicine_id::text, b.sale_price::float8, b.current_stock
-			FROM batches b
-			WHERE b.id = ANY($1)
-			ORDER BY b.id
-			FOR UPDATE`, batchIDs)
+		// Centralized deterministic locking (deadlock prevention + IDOR):
+		// LockBatchesForUpdate deduplicates, sorts lexicographically, and
+		// locks each batch strictly in that order while scoping every lock
+		// to this store. A foreign batch ID is absent from the map and
+		// surfaces as InsufficientStockError below (400 via the handler).
+		batchIDs := make([]string, 0, len(items))
+		for _, it := range items {
+			batchIDs = append(batchIDs, it.BatchID)
+		}
+		locked, err := LockBatchesForUpdate(ctx, tx, storeID, batchIDs)
 		if err != nil {
 			return err
 		}
-
-		type lockedBatch struct {
-			medicineID   string
-			salePrice    float64
-			currentStock int
-		}
-		locked := make(map[string]lockedBatch, len(batchIDs))
-		for rows.Next() {
-			var id string
-			var lb lockedBatch
-			if err := rows.Scan(&id, &lb.medicineID, &lb.salePrice, &lb.currentStock); err != nil {
-				rows.Close()
-				return err
-			}
-			locked[id] = lb
-		}
-		if err := rows.Err(); err != nil {
-			return err
-		}
-		rows.Close()
 
 	// Determine supply type from store vs customer state
 	supplyType := tax.SupplyTypeIntraState
@@ -287,38 +324,49 @@ func (r *SaleRepo) checkout(ctx context.Context, in *CheckoutInput, when time.Ti
 			buyerStateCode = *in.PlaceOfSupply
 		}
 
-		// Resolve the registered-buyer GSTIN so B2B invoices land in the
-		// GSTR-1 B2B section. B2B wholesale uses buyer_gstin; retail to a
-		// registered customer falls back to the customer's GSTIN.
-		var customerGSTIN *string
-		if isB2B {
-			if in.BuyerGSTIN != nil && *in.BuyerGSTIN != "" {
-				customerGSTIN = in.BuyerGSTIN
+	// Resolve the registered-buyer GSTIN so B2B invoices land in the
+	// GSTR-1 B2B section. B2B wholesale uses buyer_gstin; retail to a
+	// registered customer falls back to the customer's GSTIN.
+	//
+	// Walk-in (anonymous OTC) support: when customer_id is omitted, nil, or
+	// empty the transaction is a walk-in sale and no customer lookup runs.
+	// Customer identity (custGSTIN/custState) was already fetched above
+	// BEFORE batch locks to enforce Customer -> Batches lock ordering.
+	// B2B Place of Supply: if isB2B but place_of_supply was omitted,
+	// inherit the customer's state so an inter-state B2B is not silently
+	// billed as intra-state (CGST/SGST instead of IGST).
+	var customerGSTIN *string
+	if hasCustomerRow {
+		if !isB2B {
+			if custGSTIN != nil && *custGSTIN != "" {
+				customerGSTIN = custGSTIN
 			}
-		} else if in.CustomerID != nil {
-			var custGSTIN *string
-			var custStateCode *string
-			err := tx.QueryRow(ctx,
-				`SELECT gstin, state_code FROM customers WHERE id = $1`, *in.CustomerID).
-				Scan(&custGSTIN, &custStateCode)
-			if err == nil {
-				if custGSTIN != nil && *custGSTIN != "" {
-					customerGSTIN = custGSTIN
-				}
-				if custStateCode != nil && buyerStateCode == "" {
-					buyerStateCode = *custStateCode
-				}
+			if custState != nil && buyerStateCode == "" {
+				buyerStateCode = *custState
+			}
+		} else {
+			// B2B: PoS fallback inherits customer state when payload omits it.
+			if custState != nil && buyerStateCode == "" {
+				buyerStateCode = *custState
 			}
 		}
+	}
+	if isB2B {
+		if in.BuyerGSTIN != nil && *in.BuyerGSTIN != "" {
+			customerGSTIN = in.BuyerGSTIN
+		}
+	}
 		supplyType = tax.DetermineSupplyType(sellerStateCode, buyerStateCode)
 		var customerStateCode *string
 		if buyerStateCode != "" {
 			customerStateCode = &buyerStateCode
 		}
 
-		// Calculate tax for each line using the tax engine
-		total := 0.0
-		discountTotal := 0.0
+		// Calculate tax for each line using the tax engine.
+		// All subtotal/discount aggregations use decimal + banker's rounding
+		// (tax.RoundMoney); floats are only produced at DB-write time.
+		totalD := decimal.Zero
+		discountTotalD := decimal.Zero
 		var taxLines []tax.TaxLineResult
 		hasTaxConfig := false
 		var priceIncludesTax bool
@@ -329,29 +377,34 @@ func (r *SaleRepo) checkout(ctx context.Context, in *CheckoutInput, when time.Ti
 				return &models.InsufficientStockError{BatchID: it.BatchID,
 					RequestedQty: it.Quantity, AvailableStock: 0}
 			}
+			// Physical vs commercial split for bonus/scheme items:
+			// physical inventory deducts billed + bonus, while GST applies
+			// strictly to billed_quantity * unit_price (less discounts) —
+			// bonus units carry no commercial value and are invisible to tax.
 			totalNeeded := it.Quantity + it.BonusQuantity
-			if totalNeeded > lb.currentStock {
+			if totalNeeded > lb.CurrentStock {
 				return &models.InsufficientStockError{BatchID: it.BatchID,
-					RequestedQty: totalNeeded, AvailableStock: lb.currentStock}
+					RequestedQty: totalNeeded, AvailableStock: lb.CurrentStock}
 			}
 
 			// B2B: use custom sell price; Retail: use batch sale_price
-			unitPrice := lb.salePrice
+			unitPrice := lb.SalePrice
 			var mrpPtr *float64
 			if isB2B && it.SellPrice != nil && *it.SellPrice > 0 {
 				unitPrice = *it.SellPrice
-				mrp := lb.salePrice
+				mrp := lb.SalePrice
 				mrpPtr = &mrp
 			}
 
 			gross := float64(it.Quantity) * unitPrice
 			discAmount, discType, discValue := lineDiscount(gross, it.Discount)
-			net := round2(gross - discAmount)
-			total = round2(total + net)
-			discountTotal = round2(discountTotal + discAmount)
+			netD := tax.RoundMoney(decimal.NewFromFloat(gross).Sub(decimal.NewFromFloat(discAmount)))
+			totalD = tax.RoundMoney(totalD.Add(netD))
+			discountTotalD = tax.RoundMoney(discountTotalD.Add(decimal.NewFromFloat(discAmount)))
+			net, _ := netD.Float64()
 
 			li := models.SalesInvoiceItem{
-				MedicineID:     lb.medicineID,
+				MedicineID:     lb.MedicineID,
 				BatchID:        it.BatchID,
 				Quantity:       it.Quantity,
 				UnitSalePrice:  unitPrice,
@@ -361,14 +414,18 @@ func (r *SaleRepo) checkout(ctx context.Context, in *CheckoutInput, when time.Ti
 				DiscountAmount: discAmount,
 				MRP:            mrpPtr,
 				BonusQuantity:  it.BonusQuantity,
+				// Snapshot the medicine's UQC at the moment of sale so the
+				// GSTR-1 Table 12 HSN summary is immutable even if the master
+				// UQC is edited later.
+				UQC: lb.UQC,
 			}
 
 			// Look up tax configuration for this medicine as of the invoice date
 			// (not time.Now()), so historical invoices keep the tax applicable
 			// on their own invoice date rather than today's tax master.
-			taxConfig, err := r.taxRepo.GetMedicineTaxConfig(ctx, storeID, lb.medicineID, invoiceDate)
+			taxConfig, err := r.taxRepo.GetMedicineTaxConfig(ctx, storeID, lb.MedicineID, invoiceDate)
 			if err != nil {
-				return fmt.Errorf("lookup tax config for medicine %s: %w", lb.medicineID, err)
+				return fmt.Errorf("lookup tax config for medicine %s: %w", lb.MedicineID, err)
 			}
 			if taxConfig != nil && taxConfig.TaxRate != nil {
 				hasTaxConfig = true
@@ -431,7 +488,10 @@ func (r *SaleRepo) checkout(ctx context.Context, in *CheckoutInput, when time.Ti
 			lineItems = append(lineItems, li)
 		}
 
-		// Compute invoice-level GST totals (single calculation for credit check + INSERT)
+		// Compute invoice-level GST totals (single calculation for credit check + INSERT).
+		// Floats for DB writes are produced here at the very end.
+		total, _ := totalD.Float64()
+		discountTotal, _ := discountTotalD.Float64()
 		var invoiceResult *tax.TaxInvoiceResult
 		chargeableTotal := total
 		if len(taxLines) > 0 && hasTaxConfig {
@@ -440,26 +500,17 @@ func (r *SaleRepo) checkout(ctx context.Context, in *CheckoutInput, when time.Ti
 			chargeableTotal, _ = invoiceResult.GrandTotal.Float64()
 		}
 
-		var customerName string
+		// Fail-fast credit check against the row locked BEFORE batch locks
+		// (canonical Customer -> Batches hierarchy). No second SELECT here.
 		if in.PaymentType == models.PaymentCredit {
-			row := tx.QueryRow(ctx, `
-				SELECT name, credit_limit::float8, current_balance::float8
-				FROM customers WHERE id = $1
-				FOR UPDATE`, *in.CustomerID)
-			var limit, balance float64
-			if err := row.Scan(&customerName, &limit, &balance); err != nil {
-				if errors.Is(err, pgx.ErrNoRows) {
-					return models.ErrNotFound
-				}
-				return err
-			}
-			if round2(balance+chargeableTotal) > limit {
+			projected := tax.RoundMoney(decimal.NewFromFloat(custBalance).Add(decimal.NewFromFloat(chargeableTotal)))
+			if projected.GreaterThan(decimal.NewFromFloat(custLimit)) {
 				return &models.CreditLimitExceededError{
 					CustomerID:   *in.CustomerID,
-					CustomerName: customerName,
-					Outstanding:  balance,
+					CustomerName: custName,
+					Outstanding:  custBalance,
 					InvoiceTotal: chargeableTotal,
-					CreditLimit:  limit,
+					CreditLimit:  custLimit,
 				}
 			}
 		}
@@ -471,7 +522,10 @@ func (r *SaleRepo) checkout(ctx context.Context, in *CheckoutInput, when time.Ti
 		if isB2B {
 			invoicePrefix = "B2B/"
 		}
-		invoiceNo, fy, err := r.seq.NextInvoiceNumber(ctx, tx, storeID, invoicePrefix)
+		// The sequence row is per (store, invoice financial year, prefix) and
+		// is incremented inside this transaction, so concurrent checkouts
+		// serialize on it and invoice numbers stay unique and gapless.
+		invoiceNo, fy, err := r.seq.NextInvoiceNumberAt(ctx, tx, storeID, invoicePrefix, invoiceDate)
 		if err != nil {
 			return fmt.Errorf("generate invoice number: %w", err)
 		}
@@ -487,7 +541,7 @@ func (r *SaleRepo) checkout(ctx context.Context, in *CheckoutInput, when time.Ti
 					round_off, grand_total, price_includes_tax)
 				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26)
 				RETURNING id::text, invoice_no, total_amount::float8, discount_total::float8, created_at, invoice_date, financial_year`,
-				invoiceNo, in.CustomerID, in.PaymentType, total, discountTotal,
+				invoiceNo, sqlStr(in.CustomerID), in.PaymentType, total, discountTotal,
 				invoiceDate, fy,
 				in.SaleType, in.BuyerName, in.BuyerGSTIN, in.BuyerAddress,
 				sqlStr(in.StoreID), gstRegistrationID, sqlStr(customerGSTIN), sqlStr(customerStateCode),
@@ -509,7 +563,7 @@ func (r *SaleRepo) checkout(ctx context.Context, in *CheckoutInput, when time.Ti
 					round_off, grand_total, price_includes_tax)
 				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27)
 				RETURNING id::text, invoice_no, total_amount::float8, discount_total::float8, created_at, invoice_date, financial_year`,
-				invoiceNo, in.CustomerID, in.PaymentType, total, discountTotal,
+				invoiceNo, sqlStr(in.CustomerID), in.PaymentType, total, discountTotal,
 				invoiceDate, fy, when,
 				in.SaleType, in.BuyerName, in.BuyerGSTIN, in.BuyerAddress,
 				sqlStr(in.StoreID), gstRegistrationID, sqlStr(customerGSTIN), sqlStr(customerStateCode),
@@ -524,7 +578,13 @@ func (r *SaleRepo) checkout(ctx context.Context, in *CheckoutInput, when time.Ti
 		if err != nil {
 			return err
 		}
-		inv.CustomerID = in.CustomerID
+		// Normalize empty customer_id to nil so walk-in invoices read back
+		// with customer_id: null instead of "".
+		if in.CustomerID != nil && *in.CustomerID == "" {
+			inv.CustomerID = nil
+		} else {
+			inv.CustomerID = in.CustomerID
+		}
 		inv.PaymentType = in.PaymentType
 		inv.SaleType = in.SaleType
 		inv.BuyerName = in.BuyerName
@@ -558,21 +618,24 @@ func (r *SaleRepo) checkout(ctx context.Context, in *CheckoutInput, when time.Ti
 
 		for i := range lineItems {
 			li := &lineItems[i]
+			if li.UQC == "" {
+				li.UQC = "OTH"
+			}
 			err := tx.QueryRow(ctx, `
 				INSERT INTO sales_invoice_items
 					(invoice_id, medicine_id, batch_id, quantity, unit_sale_price, subtotal,
 					 discount_type, discount_value, discount_amount,
-					 mrp, bonus_quantity,
+					 mrp, bonus_quantity, uqc,
 					 hsn_code, gross_amount, taxable_value, gst_rate,
 					 cgst_rate, cgst_amount, sgst_rate, sgst_amount,
 					 igst_rate, igst_amount, cess_rate, cess_amount, line_total)
 				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9,
-				        $10, $11,
-				        $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)
+				        $10, $11, $12,
+				        $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25)
 				RETURNING id::text`,
 				inv.ID, li.MedicineID, li.BatchID, li.Quantity, li.UnitSalePrice, li.Subtotal,
 				li.DiscountType, li.DiscountValue, li.DiscountAmount,
-				li.MRP, li.BonusQuantity,
+				li.MRP, li.BonusQuantity, li.UQC,
 				li.HSNCode, li.GrossAmount, li.TaxableValue, li.GSTRate,
 				li.CGSTRate, li.CGSTAmount, li.SGSTRate, li.SGSTAmount,
 				li.IGSTRate, li.IGSTAmount, li.CessRate, li.CessAmount, li.LineTotal,
@@ -582,18 +645,24 @@ func (r *SaleRepo) checkout(ctx context.Context, in *CheckoutInput, when time.Ti
 			}
 			li.InvoiceID = inv.ID
 
-			// Deduct quantity + bonus from stock
-			totalDeduct := li.Quantity + li.BonusQuantity
-			tag, err := tx.Exec(ctx, `
-				UPDATE batches SET current_stock = current_stock - $2, updated_at = now()
-				WHERE id = $1 AND current_stock >= $2`,
-				li.BatchID, totalDeduct)
+		// Deduct quantity + bonus from stock. The store guard re-asserts
+		// tenant isolation on the write even though the rows were locked
+		// scoped above (defense in depth: zero rows affected aborts).
+		totalDeduct := li.Quantity + li.BonusQuantity
+		tag, err := tx.Exec(ctx, `
+			UPDATE batches SET current_stock = current_stock - $2, updated_at = now()
+			WHERE id = $1 AND store_id = $3 AND current_stock >= $2`,
+			li.BatchID, totalDeduct, storeID)
 			if err != nil {
 				return err
 			}
 			if tag.RowsAffected() == 0 {
+				avail := 0
+				if lb, ok := locked[li.BatchID]; ok {
+					avail = lb.CurrentStock
+				}
 				return &models.InsufficientStockError{BatchID: li.BatchID,
-					RequestedQty: totalDeduct, AvailableStock: locked[li.BatchID].currentStock}
+					RequestedQty: totalDeduct, AvailableStock: avail}
 			}
 		}
 
@@ -601,15 +670,15 @@ func (r *SaleRepo) checkout(ctx context.Context, in *CheckoutInput, when time.Ti
 			var newBalance float64
 			err := tx.QueryRow(ctx, `
 				UPDATE customers SET current_balance = current_balance + $2, updated_at = now()
-				WHERE id = $1 RETURNING current_balance::float8`,
-				*in.CustomerID, chargeableTotal).Scan(&newBalance)
+				WHERE id = $1 AND store_id = $3 RETURNING current_balance::float8`,
+				*in.CustomerID, chargeableTotal, storeID).Scan(&newBalance)
 			if err != nil {
 				return err
 			}
 			if _, err := tx.Exec(ctx, `
 				INSERT INTO customer_ledger (customer_id, entry_type, amount, balance_after, notes)
 				VALUES ($1, 'CREDIT_SALE', $2, $3, $4)`,
-				*in.CustomerID, chargeableTotal, round2(newBalance),
+				*in.CustomerID, chargeableTotal, roundMoneyFloat(newBalance),
 				fmt.Sprintf("Invoice %s", inv.InvoiceNo)); err != nil {
 				return err
 			}

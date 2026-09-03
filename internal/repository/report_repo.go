@@ -5,6 +5,9 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/shopspring/decimal"
+
+	"github.com/mohi/pms-marg-inspired/internal/tax"
 )
 
 type ReportRepo struct {
@@ -42,7 +45,7 @@ func (r *ReportRepo) Sales(ctx context.Context, storeID string, start, end time.
 	rows, err := r.db.Query(ctx, `
 		SELECT si.payment_type::text,
 		       COUNT(DISTINCT si.id)::int,
-		       COALESCE(SUM(si.total_amount), 0)::float8,
+		       COALESCE(SUM(COALESCE(si.grand_total, si.total_amount)), 0)::float8,
 		       COALESCE((SELECT SUM(sii.quantity)
 		                 FROM sales_invoice_items sii
 		                 JOIN sales_invoices s2 ON s2.id = sii.invoice_id
@@ -74,7 +77,7 @@ func (r *ReportRepo) Sales(ctx context.Context, storeID string, start, end time.
 		SELECT (si.created_at AT TIME ZONE 'UTC')::date::text,
 		       si.payment_type::text,
 		       COUNT(*)::int,
-		       COALESCE(SUM(si.total_amount), 0)::float8
+		       COALESCE(SUM(COALESCE(si.grand_total, si.total_amount)), 0)::float8
 		FROM sales_invoices si
 		WHERE si.created_at >= $1 AND si.created_at < $2 AND si.store_id = $3
 		GROUP BY 1, 2
@@ -211,9 +214,9 @@ func (r *ReportRepo) ProfitLoss(ctx context.Context, storeID string, start, end 
 		if err := rows.Scan(&l.MedicineID, &l.MedicineName, &l.UnitsSold, &l.Revenue, &l.Cost); err != nil {
 			return nil, err
 		}
-		l.Profit = round2(l.Revenue - l.Cost)
+		l.Profit = tax.RoundMoney(decimal.NewFromFloat(l.Revenue).Sub(decimal.NewFromFloat(l.Cost))).InexactFloat64()
 		if l.Revenue > 0 {
-			l.MarginPct = round2(l.Profit / l.Revenue * 100)
+			l.MarginPct = tax.RoundMoney(decimal.NewFromFloat(l.Profit).Div(decimal.NewFromFloat(l.Revenue)).Mul(decimal.NewFromInt(100))).InexactFloat64()
 		}
 		out.Lines = append(out.Lines, l)
 		out.Revenue += l.Revenue
@@ -223,11 +226,11 @@ func (r *ReportRepo) ProfitLoss(ctx context.Context, storeID string, start, end 
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	out.Revenue = round2(out.Revenue)
-	out.Cost = round2(out.Cost)
-	out.Profit = round2(out.Profit)
+	out.Revenue = tax.RoundMoney(decimal.NewFromFloat(out.Revenue)).InexactFloat64()
+	out.Cost = tax.RoundMoney(decimal.NewFromFloat(out.Cost)).InexactFloat64()
+	out.Profit = tax.RoundMoney(decimal.NewFromFloat(out.Profit)).InexactFloat64()
 	if out.Revenue > 0 {
-		out.MarginPct = round2(out.Profit / out.Revenue * 100)
+		out.MarginPct = tax.RoundMoney(decimal.NewFromFloat(out.Profit).Div(decimal.NewFromFloat(out.Revenue)).Mul(decimal.NewFromInt(100))).InexactFloat64()
 	}
 	return out, nil
 }

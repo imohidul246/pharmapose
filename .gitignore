@@ -1,0 +1,49 @@
+# Go build outputs and local binaries
+/pharmapose
+/pms-server
+/pms-seed
+/server
+*.exe
+*.test
+*.out
+/bin/
+
+# Go module cache / vendor (dependencies are fetched via go.mod)
+/vendor/
+
+# Test and coverage artifacts
+coverage.out
+coverage.html
+*.coverprofile
+
+# Web frontend dependencies and compiled bundles (rebuilt via npm)
+/web/node_modules/
+/web/dist/
+/web/*.tsbuildinfo
+
+# Vite / npm caches
+/web/.vite/
+.npm/
+node_modules/.cache/
+
+# Local environment and secrets
+.env
+.env.*
+*.env
+!web/.env.example
+token*.txt
+*token*.json
+cookies.txt
+
+# Editor and OS artifacts
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Logs and local run artifacts
+*.log
+/tmp/

@@ -2,13 +2,13 @@ package repository
 
 import (
 	"context"
-	"errors"
-	"sort"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/shopspring/decimal"
 
 	"github.com/mohi/pms-marg-inspired/internal/models"
+	"github.com/mohi/pms-marg-inspired/internal/tax"
 )
 
 type ReconcileRepo struct {
@@ -31,17 +31,17 @@ type ReconcileInput struct {
 
 func (in *ReconcileInput) validate() error {
 	if len(in.Items) == 0 {
-		return errors.New("reconciliation requires at least one item")
+		return models.NewValidationError("reconciliation requires at least one item")
 	}
 	for _, it := range in.Items {
 		if it.BatchID == "" {
-			return errors.New("item batch_id is required")
+			return models.NewValidationError("item batch_id is required")
 		}
 		if it.PhysicalCount < 0 {
-			return errors.New("physical_count must be >= 0")
+			return models.NewValidationError("physical_count must be >= 0")
 		}
 		if it.Reason == "" {
-			return errors.New("a reason is required for every adjusted batch")
+			return models.NewValidationError("a reason is required for every adjusted batch")
 		}
 	}
 	return nil
@@ -95,40 +95,13 @@ func reconcileItems(items []ReconcileItemInput) (map[string]int, []string) {
 // transaction. It is the single code path used by direct owner reconciliations
 // and by approved stock-audit requests, so both record variances identically.
 func (r *ReconcileRepo) applyReconcileCore(ctx context.Context, tx pgx.Tx, storeID string, verifiedBy *string, notes string, dedup map[string]int, order []string) (*models.ReconciliationJournal, []models.ReconciliationItem, error) {
-	batchIDs := append([]string(nil), order...)
-	sort.Strings(batchIDs)
-
-	rows, err := tx.Query(ctx, `
-		SELECT b.id::text, b.medicine_id::text, b.batch_number, b.current_stock, b.purchase_price::float8
-		FROM batches b
-		WHERE b.id = ANY($1) AND b.store_id = $2
-		ORDER BY b.id
-		FOR UPDATE`, batchIDs, storeID)
+	// Centralized deterministic locking: LockBatchesForUpdate sorts and locks
+	// in canonical order (deadlock-safe vs concurrent checkouts) and scopes
+	// every lock to this store.
+	locked, err := LockBatchesForUpdate(ctx, tx, storeID, append([]string(nil), order...))
 	if err != nil {
 		return nil, nil, err
 	}
-	type lockedBatch struct {
-		medicineID    string
-		batchNumber   string
-		systemStock   int
-		purchasePrice float64
-	}
-	locked := make(map[string]lockedBatch, len(batchIDs))
-	for rows.Next() {
-		var id string
-		var lb lockedBatch
-		if err := rows.Scan(&id, &lb.medicineID, &lb.batchNumber,
-			&lb.systemStock, &lb.purchasePrice); err != nil {
-			rows.Close()
-			return nil, nil, err
-		}
-		locked[id] = lb
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return nil, nil, err
-	}
-	rows.Close()
 
 	for _, id := range order {
 		if _, ok := locked[id]; !ok {
@@ -137,32 +110,31 @@ func (r *ReconcileRepo) applyReconcileCore(ctx context.Context, tx pgx.Tx, store
 	}
 
 	journal := models.ReconciliationJournal{}
-	err = tx.QueryRow(ctx, `
+	if err := tx.QueryRow(ctx, `
 		INSERT INTO reconciliation_journals (store_id, verified_by_user_id, notes)
 		VALUES ($1, $2, $3)
 		RETURNING id::text, verified_by_user_id, notes, created_at`,
 		storeID, verifiedBy, notes,
-	).Scan(&journal.ID, &journal.VerifiedByUserID, &journal.Notes, &journal.CreatedAt)
-	if err != nil {
+	).Scan(&journal.ID, &journal.VerifiedByUserID, &journal.Notes, &journal.CreatedAt); err != nil {
 		return nil, nil, err
 	}
 
 	items := make([]models.ReconciliationItem, 0, len(order))
 	for _, id := range order {
 		lb := locked[id]
-		variance := dedup[id] - lb.systemStock
+		variance := dedup[id] - lb.CurrentStock
 
-		costImpact := round2(float64(variance) * lb.purchasePrice)
+		costImpact := tax.RoundMoney(decimal.NewFromInt(int64(variance)).Mul(decimal.NewFromFloat(lb.PurchasePrice))).InexactFloat64()
 
 		item := models.ReconciliationItem{
 			JournalID:        journal.ID,
-			MedicineID:       lb.medicineID,
+			MedicineID:       lb.MedicineID,
 			BatchID:          id,
-			SystemStock:      lb.systemStock,
+			SystemStock:      lb.CurrentStock,
 			PhysicalStock:    dedup[id],
 			VarianceQuantity: variance,
 			CostImpact:       costImpact,
-			BatchNumber:      lb.batchNumber,
+			BatchNumber:      lb.BatchNumber,
 		}
 		err := tx.QueryRow(ctx, `
 			INSERT INTO reconciliation_items
@@ -178,8 +150,8 @@ func (r *ReconcileRepo) applyReconcileCore(ctx context.Context, tx pgx.Tx, store
 		items = append(items, item)
 
 		if _, err := tx.Exec(ctx, `
-			UPDATE batches SET current_stock = $2, updated_at = now() WHERE id = $1`,
-			id, dedup[id]); err != nil {
+			UPDATE batches SET current_stock = $2, updated_at = now() WHERE id = $1 AND store_id = $3`,
+			id, dedup[id], storeID); err != nil {
 			return nil, nil, err
 		}
 	}

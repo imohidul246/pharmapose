@@ -47,17 +47,19 @@ type GSTRegistration struct {
 }
 
 type Store struct {
-	ID                 string    `json:"id"`
-	GSTRegistrationID  *string   `json:"gst_registration_id"`
-	Name               string    `json:"name"`
-	Address            string    `json:"address"`
-	Phone              string    `json:"phone"`
-	DrugLicenseNumber  string    `json:"drug_license_number"`
-	DrugLicenseExpiry  *Date     `json:"drug_license_expiry"`
-	IsActive           bool      `json:"is_active"`
-	MaxEmployees       int       `json:"max_employees"`
-	CreatedAt          time.Time `json:"created_at"`
-	UpdatedAt          time.Time `json:"updated_at"`
+	ID                    string     `json:"id"`
+	GSTRegistrationID     *string    `json:"gst_registration_id"`
+	Name                  string     `json:"name"`
+	Address               string     `json:"address"`
+	Phone                 string     `json:"phone"`
+	DrugLicenseNumber     string     `json:"drug_license_number"`
+	DrugLicenseExpiry     *Date      `json:"drug_license_expiry"`
+	IsActive              bool       `json:"is_active"`
+	MaxEmployees          int        `json:"max_employees"`
+	CreatedAt             time.Time  `json:"created_at"`
+	UpdatedAt             time.Time  `json:"updated_at"`
+	SubscriptionValidUntil *time.Time `json:"subscription_valid_until"`
+	SubscriptionStatus    string     `json:"subscription_status"`
 
 	// OwnerName/GSTIN/PAN/StateCode are joined read-only fields surfaced by the
 	// shop details endpoint; they are not columns on stores and are never
@@ -306,6 +308,7 @@ type SalesInvoiceItem struct {
 
 	// GST tax snapshot fields (nullable for pre-GST records)
 	HSNCode      *string  `json:"hsn_code"`
+	UQC          string   `json:"uqc"`
 	GrossAmount  *float64 `json:"gross_amount"`
 	TaxableValue *float64 `json:"taxable_value"`
 	GSTRate      *float64 `json:"gst_rate"`
@@ -370,6 +373,7 @@ type PurchaseOrderItem struct {
 
 	// GST tax snapshot fields (nullable for pre-GST records)
 	HSNCode      *string  `json:"hsn_code"`
+	UQC          string   `json:"uqc"`
 	GrossAmount  *float64 `json:"gross_amount"`
 	TaxableValue *float64 `json:"taxable_value"`
 	GSTRate      *float64 `json:"gst_rate"`
@@ -432,6 +436,9 @@ type SalesCreditNoteItem struct {
 	MedicineID    string  `json:"medicine_id"`
 	BatchID       string  `json:"batch_id"`
 	Quantity      int     `json:"quantity"`
+	// BonusQuantity tracks the free units being returned alongside Quantity so
+	// inventory restock restores the FULL physical quantity (billed + bonus).
+	BonusQuantity int     `json:"bonus_quantity"`
 	HSNCode       *string `json:"hsn_code"`
 	TaxableValue  float64 `json:"taxable_value"`
 	GSTRate       float64 `json:"gst_rate"`
@@ -459,12 +466,102 @@ type ReconciliationItem struct {
 // ---- Auth / Membership ----
 
 type User struct {
-	ID        string    `json:"id"`
-	Name      string    `json:"name"`
-	Phone     string    `json:"phone"`
-	IsActive  bool      `json:"is_active"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID              string    `json:"id"`
+	Name            string    `json:"name"`
+	Phone           string    `json:"phone"`
+	IsActive        bool      `json:"is_active"`
+	IsPlatformAdmin bool      `json:"is_platform_admin"`
+	CreatedAt       time.Time `json:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
+}
+
+// StoreSubscriptionPayment is one offline cash receipt in the subscription
+// ledger. Recording a payment extends the store's validity window.
+type StoreSubscriptionPayment struct {
+	ID         string    `json:"id"`
+	StoreID    string    `json:"store_id"`
+	PlanType   string    `json:"plan_type"` // '1_MONTH' | '6_MONTHS' | '1_YEAR'
+	Amount     float64   `json:"amount"`
+	ValidFrom  time.Time `json:"valid_from"`
+	ValidUntil time.Time `json:"valid_until"`
+	Notes      string    `json:"notes,omitempty"`
+	CreatedAt  time.Time `json:"created_at"`
+}
+
+// PlatformStoreInfo is the per-store row served to the platform admin: store
+// identity + owner contact + subscription metrics with computed days remaining.
+// DaysRemaining is nil when the store has no validity window (grace).
+type PlatformStoreInfo struct {
+	StoreID                string     `json:"store_id"`
+	StoreName              string     `json:"store_name"`
+	StoreAddress           string     `json:"store_address"`
+	StorePhone             string     `json:"store_phone"`
+	IsActive               bool       `json:"is_active"`
+	OwnerName              string     `json:"owner_name,omitempty"`
+	OwnerPhone             string     `json:"owner_phone,omitempty"`
+	SubscriptionValidUntil *time.Time `json:"subscription_valid_until"`
+	SubscriptionStatus     string     `json:"subscription_status"`
+	DaysRemaining          *int       `json:"days_remaining"`
+	CreatedAt              time.Time  `json:"created_at"`
+}
+
+// Subscription plan catalogue for offline cash collection.
+const (
+	Plan1Month  = "1_MONTH"
+	Plan6Months = "6_MONTHS"
+	Plan1Year   = "1_YEAR"
+)
+
+// PlanDays maps a plan type to its validity extension in days.
+func PlanDays(planType string) (int, bool) {
+	switch planType {
+	case Plan1Month:
+		return 30, true
+	case Plan6Months:
+		return 180, true
+	case Plan1Year:
+		return 365, true
+	default:
+		return 0, false
+	}
+}
+
+// PlanAmount maps a plan type to its offline cash price in INR.
+func PlanAmount(planType string) (float64, bool) {
+	switch planType {
+	case Plan1Month:
+		return 250.00, true
+	case Plan6Months:
+		return 1350.00, true
+	case Plan1Year:
+		return 2500.00, true
+	default:
+		return 0, false
+	}
+}
+
+// DaysRemainingUntil computes whole days from now until validUntil (negative
+// when expired). Returns nil when validUntil is nil (no window = grace).
+func DaysRemainingUntil(validUntil *time.Time, now time.Time) *int {
+	if validUntil == nil {
+		return nil
+	}
+	d := int(validUntil.Sub(now).Hours() / 24)
+	return &d
+}
+
+// IsSubscriptionActive reports whether a store subscription permits logins:
+// status must be ACTIVE and the validity window (when set) must not be past.
+// A nil validUntil means grace (no expiry enforced yet) so bootstrap, legacy
+// rows and test seeds never lock out.
+func IsSubscriptionActive(status string, validUntil *time.Time, now time.Time) bool {
+	if status != "" && status != "ACTIVE" {
+		return false
+	}
+	if validUntil != nil && validUntil.Before(now) {
+		return false
+	}
+	return true
 }
 
 // Membership links a user to a store with a role and an active flag.

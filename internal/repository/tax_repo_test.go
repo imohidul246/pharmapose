@@ -77,7 +77,7 @@ func TestMedicineTaxConfigReassignmentReturnsNewHSN(t *testing.T) {
 	}
 
 	med := &models.Medicine{Name: "Reassign Med", SaltComposition: "Rx", Manufacturer: "ReassignPharma", MinReorderLevel: 1}
-	if err := medRepo.Create(ctx, med); err != nil {
+	if err := medRepo.Create(ctx, testutil.StoreID, med); err != nil {
 		t.Fatalf("create medicine: %v", err)
 	}
 
@@ -122,7 +122,7 @@ func TestMedicineTaxConfigReassignmentResolvesFromDB(t *testing.T) {
 	hsnCodeB, rateB := hsnAndRateFor(t, "9974", 28)
 
 	med := &models.Medicine{Name: "Reassign DB Med", SaltComposition: "Rx", Manufacturer: "DBPharma", MinReorderLevel: 1}
-	if err := medRepo.Create(ctx, med); err != nil {
+	if err := medRepo.Create(ctx, testutil.StoreID, med); err != nil {
 		t.Fatalf("create medicine: %v", err)
 	}
 
@@ -169,7 +169,7 @@ func TestMedicineTaxConfigReassignmentIsStoreScoped(t *testing.T) {
 	hsnB, rateB := hsnAndRateFor(t, "9976", 18)
 
 	med := &models.Medicine{Name: "Isolation Med", SaltComposition: "Rx", Manufacturer: "IsoPharma", MinReorderLevel: 1}
-	if err := medRepo.Create(ctx, med); err != nil {
+	if err := medRepo.Create(ctx, testutil.StoreID, med); err != nil {
 		t.Fatalf("create medicine: %v", err)
 	}
 
