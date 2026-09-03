@@ -380,13 +380,18 @@ func TestTaxInclusiveWithCess(t *testing.T) {
 
 	// divisor = 1 + (12+10)/100 = 1.22
 	// taxable = 118 / 1.22 = 96.72 (rounded)
-	// GST = 96.72 * 12% = 11.61 (rounded)
+	// CGST = 96.72 * 6% = 5.80, SGST = CGST (mirrored for portal symmetry),
+	// GST total = 11.60 (mirrored sum; 1p less than Round(96.72*12%) = 11.61
+	// which would split asymmetrically 5.80/5.81 and be rejected).
 	// Cess = 96.72 * 10% = 9.67 (rounded)
 	if result.TaxableValue.Cmp(d("96.72")) != 0 {
 		t.Errorf("taxable = %s want 96.72", result.TaxableValue)
 	}
-	if result.TaxAmount.Cmp(d("11.61")) != 0 {
-		t.Errorf("tax = %s want 11.61", result.TaxAmount)
+	if result.TaxAmount.Cmp(d("11.60")) != 0 {
+		t.Errorf("tax = %s want 11.60", result.TaxAmount)
+	}
+	if result.CGSTAmount.Cmp(result.SGSTAmount) != 0 {
+		t.Errorf("cgst(%s) != sgst(%s): must be symmetric", result.CGSTAmount, result.SGSTAmount)
 	}
 	if result.CessAmount.Cmp(d("9.67")) != 0 {
 		t.Errorf("cess = %s want 9.67", result.CessAmount)

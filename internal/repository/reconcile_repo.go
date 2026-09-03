@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"errors"
 	"sort"
 
 	"github.com/jackc/pgx/v5"
@@ -94,18 +95,13 @@ func reconcileItems(items []ReconcileItemInput) (map[string]int, []string) {
 // transaction. It is the single code path used by direct owner reconciliations
 // and by approved stock-audit requests, so both record variances identically.
 func (r *ReconcileRepo) applyReconcileCore(ctx context.Context, tx pgx.Tx, storeID string, verifiedBy *string, notes string, dedup map[string]int, order []string) (*models.ReconciliationJournal, []models.ReconciliationItem, error) {
+	// Deterministic lock ordering: sort batch IDs lexicographically and lock
+	// each row individually in that order (see Checkout). This prevents
+	// lock-order-inversion deadlocks when concurrent reconciliations/checkouts
+	// touch overlapping batches.
 	batchIDs := append([]string(nil), order...)
 	sort.Strings(batchIDs)
 
-	rows, err := tx.Query(ctx, `
-		SELECT b.id::text, b.medicine_id::text, b.batch_number, b.current_stock, b.purchase_price::float8
-		FROM batches b
-		WHERE b.id = ANY($1) AND b.store_id = $2
-		ORDER BY b.id
-		FOR UPDATE`, batchIDs, storeID)
-	if err != nil {
-		return nil, nil, err
-	}
 	type lockedBatch struct {
 		medicineID    string
 		batchNumber   string
@@ -113,21 +109,22 @@ func (r *ReconcileRepo) applyReconcileCore(ctx context.Context, tx pgx.Tx, store
 		purchasePrice float64
 	}
 	locked := make(map[string]lockedBatch, len(batchIDs))
-	for rows.Next() {
-		var id string
+	for _, id := range batchIDs {
 		var lb lockedBatch
-		if err := rows.Scan(&id, &lb.medicineID, &lb.batchNumber,
-			&lb.systemStock, &lb.purchasePrice); err != nil {
-			rows.Close()
+		err := tx.QueryRow(ctx, `
+			SELECT b.medicine_id::text, b.batch_number, b.current_stock, b.purchase_price::float8
+			FROM batches b
+			WHERE b.id = $1 AND b.store_id = $2
+			FOR UPDATE`, id, storeID).Scan(
+			&lb.medicineID, &lb.batchNumber, &lb.systemStock, &lb.purchasePrice)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil, nil, models.ErrNotFound
+			}
 			return nil, nil, err
 		}
 		locked[id] = lb
 	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return nil, nil, err
-	}
-	rows.Close()
 
 	for _, id := range order {
 		if _, ok := locked[id]; !ok {
@@ -136,7 +133,7 @@ func (r *ReconcileRepo) applyReconcileCore(ctx context.Context, tx pgx.Tx, store
 	}
 
 	journal := models.ReconciliationJournal{}
-	err = tx.QueryRow(ctx, `
+	err := tx.QueryRow(ctx, `
 		INSERT INTO reconciliation_journals (store_id, verified_by_user_id, notes)
 		VALUES ($1, $2, $3)
 		RETURNING id::text, verified_by_user_id, notes, created_at`,

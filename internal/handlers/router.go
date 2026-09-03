@@ -60,7 +60,7 @@ func NewRouter(d Deps) *gin.Engine {
 		api.POST("/auth/login", d.login)
 
 		protected := api.Group("")
-		protected.Use(auth.RequireAuth(d.AuthRepo, d.CookieOptions), auth.CSRFProtect(d.DevOrigins))
+		protected.Use(auth.RequireAuth(d.AuthRepo, d.CookieOptions), auth.CSRFProtect(d.DevOrigins), auth.ValidateStoreHeader())
 		{
 			protected.POST("/auth/logout", d.logout)
 			protected.GET("/auth/me", d.me)
@@ -76,7 +76,10 @@ func NewRouter(d Deps) *gin.Engine {
 
 			store := protected.Group("/store")
 			{
-				store.Use(auth.RequireOwner())
+				// Store settings are admin-only: GET for viewing and PUT for
+				// editing both require the owner (admin) role so a cashier
+				// token receives 403 on either.
+				store.Use(auth.RequireRole(auth.RoleAdmin))
 				store.GET("", d.getStore)
 				store.PUT("", d.updateStore)
 			}
@@ -125,8 +128,10 @@ func NewRouter(d Deps) *gin.Engine {
 		inv := protected.Group("/inventory")
 		{
 			// Direct reconciliation force-corrects live stock: owner-only.
-			inv.POST("/reconcile", auth.RequireRole(auth.RoleStoreOwner), d.reconcile)
-			inv.GET("/reconciliations", auth.RequirePermission(auth.PermStockView), d.listReconciliations)
+			// Both the mutation and the audit listing are guarded so a
+			// cashier receives 403 on any reconcile action.
+			inv.POST("/reconcile", auth.RequireRole(auth.RoleAdmin, auth.RoleStoreManager), d.reconcile)
+			inv.GET("/reconciliations", auth.RequireRole(auth.RoleAdmin, auth.RoleStoreManager), d.listReconciliations)
 		}
 
 		meds := protected.Group("/medicines")
@@ -186,11 +191,13 @@ func NewRouter(d Deps) *gin.Engine {
 
 			reports := protected.Group("/reports")
 			{
-			reports.GET("/sales", auth.RequirePermission(auth.PermSalesView), d.salesReport)
-			reports.GET("/purchase", auth.RequirePermission(auth.PermPurchaseView), d.purchaseReport)
-			reports.GET("/profit-loss", auth.RequirePermission(auth.PermSalesView), d.profitLossReport)
-			reports.GET("/expiry", auth.RequirePermission(auth.PermStockView), d.expiryReport)
-			reports.GET("/low-stock", auth.RequirePermission(auth.PermStockView), d.lowStockReport)
+				// Profit, sales and stock reports are sensitive: admin/manager
+				// only. A cashier token receives 403 on every report route.
+				reports.GET("/sales", auth.RequireRole(auth.RoleAdmin, auth.RoleStoreManager), d.salesReport)
+				reports.GET("/purchase", auth.RequireRole(auth.RoleAdmin, auth.RoleStoreManager), d.purchaseReport)
+				reports.GET("/profit-loss", auth.RequireRole(auth.RoleAdmin, auth.RoleStoreManager), d.profitLossReport)
+				reports.GET("/expiry", auth.RequireRole(auth.RoleAdmin, auth.RoleStoreManager), d.expiryReport)
+				reports.GET("/low-stock", auth.RequireRole(auth.RoleAdmin, auth.RoleStoreManager), d.lowStockReport)
 			}
 
 			gst := protected.Group("/gst")

@@ -6,11 +6,19 @@ import "github.com/shopspring/decimal"
 // (banker's rounding), the statutory convention for GST paise arithmetic.
 // shopspring's Round is round-half-up, so RoundBank is used explicitly.
 // This is the single authoritative rounding function for all monetary
-// calculations: every rupee amount reaching an invoice passes through here,
-// and the intra-state CGST/SGST split (CGST rounded, SGST = tax - CGST)
-// additionally guarantees CGST + SGST == Total GST exactly.
+// calculations: every rupee amount reaching an invoice passes through here.
+// Intra-state CGST/SGST symmetry is guaranteed by computing CGST directly
+// from the taxable value at half-rate and mirroring it to SGST
+// (sgst == cgst, total == 2*cgst), so CGST == SGST always holds even on
+// odd-paisa taxes where rounding the total first would split asymmetrically.
 func RoundMoney(d decimal.Decimal) decimal.Decimal {
 	return d.RoundBank(2)
+}
+
+// RoundToPaise is an alias for RoundMoney kept for call-site readability:
+// it rounds a rupee amount to the nearest paisa (2 decimals).
+func RoundToPaise(d decimal.Decimal) decimal.Decimal {
+	return RoundMoney(d)
 }
 
 // RoundQuantity rounds a decimal to 0 decimal places (whole units) using

@@ -43,28 +43,32 @@ func NewGSTR2BRepo(db *pgxpool.Pool) *GSTR2BRepo {
 // period) replaces the previous documents so the latest GSTN file is always
 // the active comparison set; the older batch remains as history.
 //
+// Tenant isolation: storeID is REQUIRED — every SELECT/INSERT/UPDATE/DELETE
+// below is scoped with an explicit `store_id = $N` guard so one store can
+// never read, replace, or match another store's GSTR-2B data (IDOR).
+//
 // The returned reconciliation reflects the matching outcome of this import.
 func (r *GSTR2BRepo) Import(ctx context.Context, storeID string, in *models.GSTR2BImportInput) (*models.GSTR2BReconciliation, error) {
 	if err := validateImport(in); err != nil {
 		return nil, err
 	}
+	if storeID == "" {
+		return nil, errors.New("store_id is required")
+	}
 
 	var rec *models.GSTR2BReconciliation
 	err := pgx.BeginFunc(ctx, r.db, func(tx pgx.Tx) error {
-		// A nil/empty store filter must become an empty string so the SQL
-		// guard `($3 = '' OR po.store_id::text = $3)` evaluates true instead
-		// of NULL (which would match nothing).
 		matchStore := storeID
-		// Replace any prior active import for the same supplier+period (and
-		// store, when one is supplied) so the reconciliation always reflects
-		// the latest GSTN file.
+		// Replace any prior active import for the same supplier+period+store
+		// so the reconciliation always reflects the latest GSTN file.
+		// Strictly tenant-scoped: only this store's documents are replaced.
 		firstGSTIN := in.Docs[0].SupplierGSTIN
 		if _, err := tx.Exec(ctx, `
 			DELETE FROM gstr2b_imports gi
 			USING gstr2b_import_batches gib
 			WHERE gi.import_batch_id = gib.id
 			  AND gib.gstin = $1 AND gib.period = $2
-			  AND ($3 = '' OR gib.store_id::text = $3)`,
+			  AND gib.store_id = $3`,
 			firstGSTIN, in.Period, storeID); err != nil {
 			return err
 		}
@@ -116,7 +120,7 @@ func (r *GSTR2BRepo) Import(ctx context.Context, storeID string, in *models.GSTR
 				FROM purchase_orders po
 				WHERE po.supplier_gstin = $1
 				  AND po.invoice_no = $2
-				  AND ($3 = '' OR po.store_id::text = $3)
+				  AND po.store_id = $3
 				ORDER BY po.invoice_date DESC, po.created_at DESC
 				LIMIT 1`,
 				d.SupplierGSTIN, d.InvoiceNo, matchStore).
@@ -197,8 +201,11 @@ func (r *GSTR2BRepo) Import(ctx context.Context, storeID string, in *models.GSTR
 	return rec, nil
 }
 
-// BatchDocs returns the documents of an import batch.
+// BatchDocs returns the documents of an import batch (strictly tenant-scoped).
 func (r *GSTR2BRepo) BatchDocs(ctx context.Context, storeID, batchID string) ([]models.GSTR2BImport, error) {
+	if storeID == "" {
+		return nil, errors.New("store_id is required")
+	}
 	rows, err := r.db.Query(ctx, `
 		SELECT id::text, import_batch_id::text, store_id::text, supplier_gstin, doc_type, period,
 		       invoice_no, invoice_date, taxable_value::float8,
@@ -235,13 +242,17 @@ func (r *GSTR2BRepo) BatchDocs(ctx context.Context, storeID, batchID string) ([]
 	return out, rows.Err()
 }
 
-// ListBatches returns import batches, newest first.
+// ListBatches returns import batches for ONE store, newest first.
+// The store filter is mandatory: cross-store listing is never allowed.
 func (r *GSTR2BRepo) ListBatches(ctx context.Context, storeID string) ([]models.GSTR2BImportBatch, error) {
+	if storeID == "" {
+		return nil, errors.New("store_id is required")
+	}
 	rows, err := r.db.Query(ctx, `
 		SELECT id::text, store_id::text, gstin, period, file_name, doc_count, matched_count,
 		       unmatched_count, status, created_at
 		FROM gstr2b_import_batches
-		WHERE $1 = '' OR store_id::text = $1
+		WHERE store_id = $1
 		ORDER BY created_at DESC`, storeID)
 	if err != nil {
 		return nil, err
@@ -262,14 +273,17 @@ func (r *GSTR2BRepo) ListBatches(ctx context.Context, storeID string) ([]models.
 	return out, rows.Err()
 }
 
-// GetBatch returns a single import batch.
+// GetBatch returns a single import batch belonging to the given store.
 func (r *GSTR2BRepo) GetBatch(ctx context.Context, storeID, batchID string) (*models.GSTR2BImportBatch, error) {
+	if storeID == "" {
+		return nil, errors.New("store_id is required")
+	}
 	var b models.GSTR2BImportBatch
 	var storeID2 *string
 	err := r.db.QueryRow(ctx, `
 		SELECT id::text, store_id::text, gstin, period, file_name, doc_count, matched_count,
 		       unmatched_count, status, created_at
-		FROM gstr2b_import_batches WHERE id = $1 AND ($2 = '' OR store_id::text = $2)`, batchID, storeID).
+		FROM gstr2b_import_batches WHERE id = $1 AND store_id = $2`, batchID, storeID).
 		Scan(&b.ID, &storeID2, &b.GSTIN, &b.Period, &b.FileName,
 			&b.DocCount, &b.MatchedCount, &b.UnmatchedCount, &b.Status, &b.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {

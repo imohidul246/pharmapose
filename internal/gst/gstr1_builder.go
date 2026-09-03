@@ -438,13 +438,17 @@ func (b *GSTR1Builder) buildB2CS(ctx context.Context, req GSTR1Request) ([]B2CSI
 // buildHSN constructs the single Table 12 HSN summary across all outward
 // supplies, grouped by hsn + uqc + rate (a single HSN can carry multiple
 // GST rates) and aggregated with SQL ROUND.
+//
+// The UQC is read DIRECTLY from sales_invoice_items.uqc — the snapshot taken
+// at the moment of sale — never by joining back to medicines. A later edit of
+// the medicine master must not rewrite already-filed HSN history.
 func (b *GSTR1Builder) buildHSN(ctx context.Context, req GSTR1Request) ([]HSNSummary, error) {
 	rows, err := b.db.Query(ctx, `
 		SELECT COALESCE(sii.hsn_code, 'UNKNOWN') AS hsn,
 		       COALESCE(hc.description, '') AS descr,
-		       COALESCE(m.uqc, 'NOS') AS uqc,
+		       COALESCE(NULLIF(sii.uqc, ''), 'OTH') AS uqc,
 		       COALESCE(sii.gst_rate, 0)::float8 AS rate,
-		       SUM(sii.quantity)::float8 AS total_qty,
+		       SUM(sii.quantity + COALESCE(sii.bonus_quantity, 0))::float8 AS total_qty,
 		       ROUND(SUM(COALESCE(sii.taxable_value, sii.subtotal)), 2)::float8 AS total_taxable,
 		       ROUND(SUM(COALESCE(sii.cgst_amount, 0)), 2)::float8 AS total_cgst,
 		       ROUND(SUM(COALESCE(sii.sgst_amount, 0)), 2)::float8 AS total_sgst,
@@ -452,12 +456,11 @@ func (b *GSTR1Builder) buildHSN(ctx context.Context, req GSTR1Request) ([]HSNSum
 		       ROUND(SUM(COALESCE(sii.cess_amount, 0)), 2)::float8 AS total_cess
 		FROM sales_invoices si
 		JOIN sales_invoice_items sii ON sii.invoice_id = si.id
-		JOIN medicines m ON m.id = sii.medicine_id
 		LEFT JOIN hsn_codes hc ON hc.code = sii.hsn_code
 		WHERE si.invoice_date >= $1 AND si.invoice_date < $2
 		  AND ($3 = '' OR si.store_id::text = $3)
-		GROUP BY sii.hsn_code, hc.description, m.uqc, sii.gst_rate
-		ORDER BY sii.hsn_code, m.uqc, sii.gst_rate`,
+		GROUP BY sii.hsn_code, hc.description, sii.uqc, sii.gst_rate
+		ORDER BY sii.hsn_code, sii.uqc, sii.gst_rate`,
 		req.StartDate, req.EndDate, req.StoreID)
 	if err != nil {
 		return nil, fmt.Errorf("hsn query: %w", err)

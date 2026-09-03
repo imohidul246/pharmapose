@@ -118,6 +118,7 @@ type lineResult struct {
 	netPrice         float64
 	taxLine          *tax.TaxLineResult
 	hsnCode          string
+	uqc              string
 	priceIncludesTax bool
 }
 
@@ -253,6 +254,7 @@ func (r *PurchaseRepo) createInwardTx(ctx context.Context, tx pgx.Tx, in *Purcha
 		it := &lr.input
 		if it.MedicineID != "" {
 			var exists bool
+			var medUQC *string
 			if err := tx.QueryRow(ctx,
 				`SELECT EXISTS(SELECT 1 FROM medicines WHERE id = $1 AND store_id = $2 AND deleted_at IS NULL)`,
 				it.MedicineID, storeID).Scan(&exists); err != nil {
@@ -260,6 +262,14 @@ func (r *PurchaseRepo) createInwardTx(ctx context.Context, tx pgx.Tx, in *Purcha
 			}
 			if !exists {
 				return nil, nil, fmt.Errorf("medicine %s not found", it.MedicineID)
+			}
+			// Snapshot the medicine's UQC for the purchase line item.
+			if err := tx.QueryRow(ctx,
+				`SELECT uqc FROM medicines WHERE id = $1 AND store_id = $2`,
+				it.MedicineID, storeID).Scan(&medUQC); err == nil && medUQC != nil && *medUQC != "" {
+				lr.uqc = *medUQC
+			} else if lr.uqc == "" {
+				lr.uqc = "OTH"
 			}
 			continue
 		}
@@ -274,6 +284,13 @@ func (r *PurchaseRepo) createInwardTx(ctx context.Context, tx pgx.Tx, in *Purcha
 			return nil, nil, err
 		}
 		it.MedicineID = newID
+		// Snapshot UQC for the newly registered medicine (defaults to NOS).
+		var newUQC string
+		if err := tx.QueryRow(ctx, `SELECT COALESCE(uqc,'OTH') FROM medicines WHERE id = $1`, newID).Scan(&newUQC); err == nil && newUQC != "" {
+			lr.uqc = newUQC
+		} else if lr.uqc == "" {
+			lr.uqc = "OTH"
+		}
 
 		// If an HSN code is provided, classify the new medicine and link
 		// it to the HSN's active tax rate. All of this happens on the same
@@ -443,21 +460,25 @@ func (r *PurchaseRepo) createInwardTx(ctx context.Context, tx pgx.Tx, in *Purcha
 		}
 
 		var itemID string
+		uqc := lr.uqc
+		if uqc == "" {
+			uqc = "OTH"
+		}
 		if err := tx.QueryRow(ctx, `
 			INSERT INTO purchase_order_items
 				(purchase_id, medicine_id, batch_number, expiry_date, quantity, bonus_quantity,
 				 purchase_price, sale_price, discount_type, discount_value, discount_amount,
-				 hsn_code, gross_amount, taxable_value, gst_rate,
+				 hsn_code, uqc, gross_amount, taxable_value, gst_rate,
 				 cgst_rate, cgst_amount, sgst_rate, sgst_amount,
 				 igst_rate, igst_amount, cess_rate, cess_amount, line_total)
 			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
-			        $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)
+			        $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25)
 			RETURNING id::text`,
 			po.ID, it.MedicineID, it.BatchNumber, it.ExpiryDate.Time,
 			it.Quantity, it.BonusQuantity,
 			it.PurchasePrice, it.SalePrice,
 			lr.discType, lr.discVal, lr.discAmt,
-			sqlStr(&lr.hsnCode), derefFloatPtrTax(lr.taxLine, "GrossAmount"),
+			sqlStr(&lr.hsnCode), uqc, derefFloatPtrTax(lr.taxLine, "GrossAmount"),
 			derefFloatPtrTax(lr.taxLine, "TaxableValue"), derefFloatPtrTax(lr.taxLine, "GSTRate"),
 			derefFloatPtrTax(lr.taxLine, "CGSTRate"), derefFloatPtrTax(lr.taxLine, "CGSTAmount"),
 			derefFloatPtrTax(lr.taxLine, "SGSTRate"), derefFloatPtrTax(lr.taxLine, "SGSTAmount"),
@@ -481,6 +502,7 @@ func (r *PurchaseRepo) createInwardTx(ctx context.Context, tx pgx.Tx, in *Purcha
 			DiscountType:   lr.discType,
 			DiscountValue:  lr.discVal,
 			DiscountAmount: lr.discAmt,
+			UQC:            uqc,
 		}
 		if lr.taxLine != nil {
 			grossF, _ := lr.taxLine.GrossAmount.Float64()

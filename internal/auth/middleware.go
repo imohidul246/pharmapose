@@ -98,6 +98,40 @@ func RequireRole(roles ...Role) gin.HandlerFunc {
 	}
 }
 
+// Role aliases for the generic RBAC vocabulary used by compliance checklists:
+// RoleAdmin is the tenant administrator (STORE_OWNER) and RoleStoreManager is
+// currently also the STORE_OWNER — the codebase has no separate manager tier,
+// so both aliases resolve to the owner role. They exist so route guards can
+// be written as RequireRole(RoleAdmin, RoleStoreManager) per spec while
+// remaining backward-compatible with the membership CHECK
+// (role IN ('STORE_OWNER','EMPLOYEE')).
+const (
+	RoleAdmin        Role = RoleStoreOwner
+	RoleStoreManager Role = RoleStoreOwner
+	RoleCashier      Role = RoleEmployee
+)
+
+// ValidateStoreHeader rejects multi-store header tampering: when the client
+// supplies an X-Store-ID header it MUST equal the authenticated principal's
+// store. The header is never trusted on its own — the principal (resolved
+// server-side from the session) is authoritative, and any mismatch aborts
+// with 403 before the handler runs. Requests without the header pass through
+// (the principal's store is used downstream).
+func ValidateStoreHeader() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		p := PrincipalFromContext(c.Request.Context())
+		if p == nil {
+			c.Next()
+			return
+		}
+		if hdr := c.GetHeader("X-Store-ID"); hdr != "" && hdr != p.StoreID {
+			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": ErrForbidden.Error()})
+			return
+		}
+		c.Next()
+	}
+}
+
 // RequireOwner gates a route to the store owner (approvals, employee management,
 // settings, direct purchase/reconcile posting).
 func RequireOwner() gin.HandlerFunc {

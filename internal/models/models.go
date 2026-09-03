@@ -306,6 +306,7 @@ type SalesInvoiceItem struct {
 
 	// GST tax snapshot fields (nullable for pre-GST records)
 	HSNCode      *string  `json:"hsn_code"`
+	UQC          string   `json:"uqc"`
 	GrossAmount  *float64 `json:"gross_amount"`
 	TaxableValue *float64 `json:"taxable_value"`
 	GSTRate      *float64 `json:"gst_rate"`
@@ -370,6 +371,7 @@ type PurchaseOrderItem struct {
 
 	// GST tax snapshot fields (nullable for pre-GST records)
 	HSNCode      *string  `json:"hsn_code"`
+	UQC          string   `json:"uqc"`
 	GrossAmount  *float64 `json:"gross_amount"`
 	TaxableValue *float64 `json:"taxable_value"`
 	GSTRate      *float64 `json:"gst_rate"`
@@ -432,6 +434,9 @@ type SalesCreditNoteItem struct {
 	MedicineID    string  `json:"medicine_id"`
 	BatchID       string  `json:"batch_id"`
 	Quantity      int     `json:"quantity"`
+	// BonusQuantity tracks the free units being returned alongside Quantity so
+	// inventory restock restores the FULL physical quantity (billed + bonus).
+	BonusQuantity int     `json:"bonus_quantity"`
 	HSNCode       *string `json:"hsn_code"`
 	TaxableValue  float64 `json:"taxable_value"`
 	GSTRate       float64 `json:"gst_rate"`

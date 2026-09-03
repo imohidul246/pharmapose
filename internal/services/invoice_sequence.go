@@ -43,7 +43,11 @@ func FinancialYear(t time.Time) string {
 // which is the standard, acceptable source of gaps; committed numbers are
 // strictly gapless per (store, financial year, prefix).
 //
-// Format: INV/YY-YY/NNNNN (e.g. INV/26-27/00001)
+// Format complies with CGST Rule 46(b): consecutive, unique per financial
+// year, max 16 characters. Format: PREFIX/YY-YY/NNNNN (e.g. INV/26-27/00001
+// = 15 chars, CN/26-27/00001 = 14 chars). The sequence row is isolated by
+// (store_id, financial_year, prefix) so every store + FY has an independent
+// series.
 func (s *InvoiceSequence) NextInvoiceNumber(ctx context.Context, tx pgx.Tx, storeID string, prefix string) (string, string, error) {
 	return s.NextInvoiceNumberAt(ctx, tx, storeID, prefix, time.Now().UTC())
 }
@@ -59,6 +63,9 @@ func (s *InvoiceSequence) NextInvoiceNumberAt(ctx context.Context, tx pgx.Tx, st
 	if storeID == "" {
 		seq := s.fallbackSeq.Add(1)
 		invoiceNo := fmt.Sprintf("%s%s/%05d", prefix, formatFY(fy), seq)
+		if len(invoiceNo) > 16 {
+			return "", fy, fmt.Errorf("generated invoice number %q exceeds 16 characters (CGST Rule 46(b))", invoiceNo)
+		}
 		return invoiceNo, fy, nil
 	}
 
@@ -85,14 +92,26 @@ func (s *InvoiceSequence) NextInvoiceNumberAt(ctx context.Context, tx pgx.Tx, st
 	}
 
 	invoiceNo := fmt.Sprintf("%s%s/%05d", prefix, formatFY(fy), nextVal)
+	// CGST Rule 46(b): invoice numbers must not exceed 16 characters.
+	if len(invoiceNo) > 16 {
+		return "", fy, fmt.Errorf("generated invoice number %q exceeds 16 characters (CGST Rule 46(b))", invoiceNo)
+	}
 	return invoiceNo, fy, nil
 }
 
-// NextCreditNoteNumber generates the next credit note number for a store.
+// NextCreditNoteNumber generates the next credit note number for a store
+// within the current financial year.
 //
-// Format: CN/YY-YY/NNNNN
+// Format: CN/YY-YY/NNNNN (max 16 chars, unique per FY per store).
 func (s *InvoiceSequence) NextCreditNoteNumber(ctx context.Context, tx pgx.Tx, storeID string) (string, string, error) {
 	return s.NextInvoiceNumber(ctx, tx, storeID, "CN/")
+}
+
+// NextCreditNoteNumberAt behaves like NextCreditNoteNumber but attributes the
+// number to the financial year containing `at` (the note date), so back-dated
+// returns never borrow numbers from the wrong financial year.
+func (s *InvoiceSequence) NextCreditNoteNumberAt(ctx context.Context, tx pgx.Tx, storeID string, at time.Time) (string, string, error) {
+	return s.NextInvoiceNumberAt(ctx, tx, storeID, "CN/", at)
 }
 
 // formatFY converts "2026-27" to "26-27" for display in invoice numbers.

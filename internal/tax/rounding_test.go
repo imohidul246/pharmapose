@@ -29,10 +29,14 @@ func TestRoundMoneyHalfEven(t *testing.T) {
 }
 
 // TestCGSTSGSTSplitSumsToTotalGST is the fractional-paise invariant: for any
-// line tax, CGST + SGST must equal the total GST exactly — no drift, no lost
-// paisa — including odd-paisa taxes where the half-paisa split itself ties.
+// intra-state line, CGST MUST equal SGST exactly (GSTN portal requirement)
+// and CGST + SGST must equal the line's total GST. On odd-paisa ties the
+// total is the mirrored sum (2*CGST), which may differ from
+// Round(taxable*rate/100) by 1p — symmetry takes precedence over preserving
+// the independently-rounded total.
 func TestCGSTSGSTSplitSumsToTotalGST(t *testing.T) {
-	// 5% of 1.00 = 0.05 total GST → 0.025 each half (an exact tie).
+	// 5% of 1.00: half-rate 2.5% -> 0.025 -> banker's 0.02 each.
+	// Total is the mirrored 0.04 (NOT 0.05): CGST == SGST is mandatory.
 	result := tax.CalculateLineTax(tax.TaxInput{
 		Quantity:         d("1"),
 		UnitPrice:        d("1.00"),
@@ -42,8 +46,9 @@ func TestCGSTSGSTSplitSumsToTotalGST(t *testing.T) {
 		SupplyType:       tax.SupplyTypeIntraState,
 		HSNCode:          "3004",
 	})
-	if result.TaxAmount.Cmp(d("0.05")) != 0 {
-		t.Fatalf("tax = %s want 0.05", result.TaxAmount)
+	if result.CGSTAmount.Cmp(result.SGSTAmount) != 0 {
+		t.Fatalf("cgst(%s) != sgst(%s): intra-state split must be symmetric",
+			result.CGSTAmount, result.SGSTAmount)
 	}
 	sum := result.CGSTAmount.Add(result.SGSTAmount)
 	if sum.Cmp(result.TaxAmount) != 0 {

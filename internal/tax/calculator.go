@@ -74,13 +74,24 @@ func CalculateLineTax(in TaxInput) TaxLineResult {
 	if in.SupplyType == SupplyTypeInterState {
 		igstAmount = taxAmount
 	} else {
-		// Intra-state: split equally between CGST and SGST. CGST is rounded to
-		// two decimals and SGST takes the remaining paise so the sum of the two
-		// always equals the line tax exactly (preserving MRP exactness).
-		cgstAmount = taxAmount.Div(two)
-		cgstAmount = RoundMoney(cgstAmount)
-		sgstAmount = taxAmount.Sub(cgstAmount)
-		sgstAmount = RoundMoney(sgstAmount)
+		// Intra-state: CGST MUST equal SGST exactly (GSTN portal rejects
+		// asymmetric splits). Compute CGST in integer paise directly from
+		// the taxable value at half the GST rate, then MIRROR it to SGST so
+		// the two can never drift by a paisa:
+		//
+		//   cgst = RoundToPaise(taxable * (rate/2) / 100)
+		//   sgst = cgst
+		//   total = cgst + sgst
+		//
+		// Never round the total first and split it, and never round CGST and
+		// SGST independently — both produce 1p asymmetries on odd-paisa taxes
+		// (e.g. Rs 13.75 @ 5% -> 0.34/0.35) that the portal rejects. The total
+		// here may differ from Round(taxable*rate/100) by 1p on such ties;
+		// symmetry is the statutory requirement and takes precedence.
+		halfRate := in.TaxRate.GSTRate.Div(two)
+		cgstAmount = RoundMoney(taxableValue.Mul(halfRate).Div(oneHundred))
+		sgstAmount = cgstAmount
+		taxAmount = cgstAmount.Add(sgstAmount)
 	}
 
 	var lineTotal decimal.Decimal

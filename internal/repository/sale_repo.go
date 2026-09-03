@@ -238,44 +238,54 @@ func (r *SaleRepo) checkout(ctx context.Context, in *CheckoutInput, when time.Ti
 
 	var result *CheckoutResult
 	err = pgx.BeginFunc(ctx, r.db, func(tx pgx.Tx) error {
-		batchIDs := make([]string, len(items))
-		for i, it := range items {
-			batchIDs[i] = it.BatchID
+		// Deterministic batch lock ordering (deadlock prevention): extract the
+		// UNIQUE batch UUIDs, sort lexicographically, and lock each row in
+		// strict sorted order. Two concurrent checkouts touching overlapping
+		// batches in opposite payload order still serialize on the same lock
+		// sequence, so PostgreSQL never sees a lock-order inversion deadlock.
+		seen := make(map[string]struct{}, len(items))
+		batchIDs := make([]string, 0, len(items))
+		for _, it := range items {
+			if _, ok := seen[it.BatchID]; !ok {
+				seen[it.BatchID] = struct{}{}
+				batchIDs = append(batchIDs, it.BatchID)
+			}
 		}
 		sort.Strings(batchIDs)
 
-		// Pessimistic lock, tenant-scoped: a store can only lock (and learn
-		// about) its own batches. A batch ID from another store simply does
-		// not match and surfaces as InsufficientStockError below.
-		rows, err := tx.Query(ctx, `
-			SELECT b.id::text, b.medicine_id::text, b.sale_price::float8, b.current_stock
-			FROM batches b
-			WHERE b.id = ANY($1) AND b.store_id = $2
-			ORDER BY b.id
-			FOR UPDATE`, batchIDs, storeID)
-		if err != nil {
-			return err
-		}
-
+		// Pessimistic lock, tenant-scoped (IDOR prevention): every lock is
+		// additionally guarded by store_id, i.e.
+		//   SELECT ... FROM batches WHERE id = $1 AND store_id = $2 FOR UPDATE
+		// A batch ID from another store matches nothing and surfaces as
+		// InsufficientStockError below (400 via the handler), so cross-tenant
+		// stock can never be locked, read, or decremented.
 		type lockedBatch struct {
 			medicineID   string
 			salePrice    float64
 			currentStock int
+			uqc          string
 		}
 		locked := make(map[string]lockedBatch, len(batchIDs))
-		for rows.Next() {
-			var id string
+		for _, batchID := range batchIDs {
 			var lb lockedBatch
-			if err := rows.Scan(&id, &lb.medicineID, &lb.salePrice, &lb.currentStock); err != nil {
-				rows.Close()
+			err := tx.QueryRow(ctx, `
+				SELECT b.medicine_id::text, b.sale_price::float8, b.current_stock,
+				       COALESCE(m.uqc, 'OTH')
+				FROM batches b
+				JOIN medicines m ON m.id = b.medicine_id
+				WHERE b.id = $1 AND b.store_id = $2
+				FOR UPDATE`, batchID, storeID).Scan(
+				&lb.medicineID, &lb.salePrice, &lb.currentStock, &lb.uqc)
+			if errors.Is(err, pgx.ErrNoRows) {
+				// Unknown ID OR foreign-tenant batch: indistinguishable by
+				// design (no oracle), reported as out-of-stock.
+				continue
+			}
+			if err != nil {
 				return err
 			}
-			locked[id] = lb
+			locked[batchID] = lb
 		}
-		if err := rows.Err(); err != nil {
-			return err
-		}
-		rows.Close()
 
 	// Determine supply type from store vs customer state
 	supplyType := tax.SupplyTypeIntraState
@@ -380,6 +390,10 @@ func (r *SaleRepo) checkout(ctx context.Context, in *CheckoutInput, when time.Ti
 				DiscountAmount: discAmount,
 				MRP:            mrpPtr,
 				BonusQuantity:  it.BonusQuantity,
+				// Snapshot the medicine's UQC at the moment of sale so the
+				// GSTR-1 Table 12 HSN summary is immutable even if the master
+				// UQC is edited later.
+				UQC: lb.uqc,
 			}
 
 			// Look up tax configuration for this medicine as of the invoice date
@@ -583,21 +597,24 @@ func (r *SaleRepo) checkout(ctx context.Context, in *CheckoutInput, when time.Ti
 
 		for i := range lineItems {
 			li := &lineItems[i]
+			if li.UQC == "" {
+				li.UQC = "OTH"
+			}
 			err := tx.QueryRow(ctx, `
 				INSERT INTO sales_invoice_items
 					(invoice_id, medicine_id, batch_id, quantity, unit_sale_price, subtotal,
 					 discount_type, discount_value, discount_amount,
-					 mrp, bonus_quantity,
+					 mrp, bonus_quantity, uqc,
 					 hsn_code, gross_amount, taxable_value, gst_rate,
 					 cgst_rate, cgst_amount, sgst_rate, sgst_amount,
 					 igst_rate, igst_amount, cess_rate, cess_amount, line_total)
 				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9,
-				        $10, $11,
-				        $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)
+				        $10, $11, $12,
+				        $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25)
 				RETURNING id::text`,
 				inv.ID, li.MedicineID, li.BatchID, li.Quantity, li.UnitSalePrice, li.Subtotal,
 				li.DiscountType, li.DiscountValue, li.DiscountAmount,
-				li.MRP, li.BonusQuantity,
+				li.MRP, li.BonusQuantity, li.UQC,
 				li.HSNCode, li.GrossAmount, li.TaxableValue, li.GSTRate,
 				li.CGSTRate, li.CGSTAmount, li.SGSTRate, li.SGSTAmount,
 				li.IGSTRate, li.IGSTAmount, li.CessRate, li.CessAmount, li.LineTotal,
