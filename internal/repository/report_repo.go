@@ -5,6 +5,9 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/shopspring/decimal"
+
+	"github.com/mohi/pms-marg-inspired/internal/tax"
 )
 
 type ReportRepo struct {
@@ -211,9 +214,9 @@ func (r *ReportRepo) ProfitLoss(ctx context.Context, storeID string, start, end 
 		if err := rows.Scan(&l.MedicineID, &l.MedicineName, &l.UnitsSold, &l.Revenue, &l.Cost); err != nil {
 			return nil, err
 		}
-		l.Profit = round2(l.Revenue - l.Cost)
+		l.Profit = tax.RoundMoney(decimal.NewFromFloat(l.Revenue).Sub(decimal.NewFromFloat(l.Cost))).InexactFloat64()
 		if l.Revenue > 0 {
-			l.MarginPct = round2(l.Profit / l.Revenue * 100)
+			l.MarginPct = tax.RoundMoney(decimal.NewFromFloat(l.Profit).Div(decimal.NewFromFloat(l.Revenue)).Mul(decimal.NewFromInt(100))).InexactFloat64()
 		}
 		out.Lines = append(out.Lines, l)
 		out.Revenue += l.Revenue
@@ -223,11 +226,11 @@ func (r *ReportRepo) ProfitLoss(ctx context.Context, storeID string, start, end 
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	out.Revenue = round2(out.Revenue)
-	out.Cost = round2(out.Cost)
-	out.Profit = round2(out.Profit)
+	out.Revenue = tax.RoundMoney(decimal.NewFromFloat(out.Revenue)).InexactFloat64()
+	out.Cost = tax.RoundMoney(decimal.NewFromFloat(out.Cost)).InexactFloat64()
+	out.Profit = tax.RoundMoney(decimal.NewFromFloat(out.Profit)).InexactFloat64()
 	if out.Revenue > 0 {
-		out.MarginPct = round2(out.Profit / out.Revenue * 100)
+		out.MarginPct = tax.RoundMoney(decimal.NewFromFloat(out.Profit).Div(decimal.NewFromFloat(out.Revenue)).Mul(decimal.NewFromInt(100))).InexactFloat64()
 	}
 	return out, nil
 }

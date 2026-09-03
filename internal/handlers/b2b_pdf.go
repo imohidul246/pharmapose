@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"strings"
@@ -19,11 +20,11 @@ type PDFDeps struct {
 
 // GET /api/sales/invoices/:id/pdf — B2B invoice PDF download.
 //
-// The PDF streams directly to the HTTP response writer (GenerateInvoicePDF
-// writes to the given io.Writer) so large invoices never sit fully buffered
-// in memory. Seller identity is validated BEFORE headers are sent, so a
-// store with missing GSTIN / trade name / state code gets a clean 400
-// instead of a corrupt download.
+// The PDF is rendered into a buffer first; headers are sent only after
+// generation succeeds, so a mid-generation failure yields a clean JSON
+// error (400/500) instead of a truncated 200 OK PDF. Seller identity is
+// validated BEFORE generation, so a store with missing GSTIN / trade name /
+// state code gets a clean 400 instead of a corrupt download.
 func (d PDFDeps) generateB2BInvoicePDF(c *gin.Context) {
 	id := c.Param("id")
 	detail, err := d.SaleRepo.GetInvoice(c.Request.Context(), storeIDFor(c), id)
@@ -119,18 +120,19 @@ func (d PDFDeps) generateB2BInvoicePDF(c *gin.Context) {
 		Buyer:   buyer,
 	}
 
-	c.Header("Content-Type", "application/pdf")
-	c.Header("Content-Disposition", fmt.Sprintf("inline; filename=B2B_%s.pdf", detail.Invoice.InvoiceNo))
-
-	// Stream straight to the response writer. Validation and font loading
-	// both happen before the first byte is flushed, so a generation failure
-	// here can only be a mid-stream write error — log it instead of
-	// attempting a second status line.
-	if err := pdf.GenerateInvoicePDF(c.Writer, data); err != nil {
-		if errors.Is(err, pdf.ErrSellerIncomplete) && !c.Writer.Written() {
+	// Render into a buffer first: if generation fails, no headers have been
+	// flushed yet, so a normal JSON error is still possible.
+	var buf bytes.Buffer
+	if err := pdf.GenerateInvoicePDF(&buf, data); err != nil {
+		if errors.Is(err, pdf.ErrSellerIncomplete) {
 			respondBadRequest(c, err)
 			return
 		}
-		respondStreamError(c, err)
+		respondInternal(c, err)
+		return
 	}
+
+	c.Header("Content-Type", "application/pdf")
+	c.Header("Content-Disposition", fmt.Sprintf("inline; filename=B2B_%s.pdf", detail.Invoice.InvoiceNo))
+	c.Data(200, "application/pdf", buf.Bytes())
 }

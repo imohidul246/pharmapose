@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -60,9 +59,12 @@ type CheckoutResult struct {
 	Items   []models.SalesInvoiceItem `json:"items"`
 }
 
-// round2 clamps monetary math to two decimals to avoid float drift.
-func round2(v float64) float64 {
-	return math.Round(v*100) / 100
+// roundMoneyFloat is the single float64 rounding bridge for legacy float
+// amounts: banker's (round-half-even) to 2 decimals via the tax engine.
+// Prefer pure decimal.Decimal + tax.RoundMoney aggregation; use this only
+// when converting a final float for DB writes or comparisons.
+func roundMoneyFloat(v float64) float64 {
+	return tax.RoundMoney(decimal.NewFromFloat(v)).InexactFloat64()
 }
 
 func (in *CheckoutInput) validate() error {
@@ -170,20 +172,25 @@ func mergedItems(items []CheckoutItemInput) ([]CheckoutItemInput, error) {
 }
 
 // lineDiscount resolves the rupee concession for a line, clamped so the net
-// amount can never drop below zero.
+// amount can never drop below zero. Rounding is banker's (round-half-even)
+// via the tax engine so aggregations match GSTR-1.
 func lineDiscount(gross float64, d *LineDiscount) (amount float64, dtype string, dvalue float64) {
 	if d == nil || d.Value <= 0 || gross <= 0 {
 		return 0, "NONE", 0
 	}
+	grossD := decimal.NewFromFloat(gross)
+	var amtD decimal.Decimal
 	if d.Type == "percent" {
-		amount = gross * d.Value / 100
+		amtD = grossD.Mul(decimal.NewFromFloat(d.Value)).Div(decimal.NewFromInt(100))
 	} else {
-		amount = d.Value
+		amtD = decimal.NewFromFloat(d.Value)
 	}
-	if amount > gross {
-		amount = gross
+	if amtD.GreaterThan(grossD) {
+		amtD = grossD
 	}
-	return round2(amount), d.Type, d.Value
+	amtD = tax.RoundMoney(amtD)
+	f, _ := amtD.Float64()
+	return f, d.Type, d.Value
 }
 
 // Checkout executes the full sale atomically:
@@ -237,6 +244,54 @@ func (r *SaleRepo) checkout(ctx context.Context, in *CheckoutInput, when time.Ti
 
 	var result *CheckoutResult
 	err = pgx.BeginFunc(ctx, r.db, func(tx pgx.Tx) error {
+		// Canonical lock hierarchy (deadlock safety + fail-fast):
+		// ALWAYS lock the parent/actor row (Customer) BEFORE the
+		// highly-contended inventory rows (Batches). The credit-limit
+		// check therefore runs before any batch lock or tax computation.
+		var custName string
+		var custLimit, custBalance float64
+		var custGSTIN *string
+		var custState *string
+		customerLocked := false
+		hasCustomerRow := false
+		if in.PaymentType == models.PaymentCredit {
+			if in.CustomerID == nil || *in.CustomerID == "" {
+				return models.NewValidationError("credit sale requires a customer")
+			}
+			row := tx.QueryRow(ctx, `
+				SELECT name, credit_limit::float8, current_balance::float8, gstin, state_code
+				FROM customers WHERE id = $1 AND store_id = $2
+				FOR UPDATE`, *in.CustomerID, storeID)
+			var gstinVal, stateVal *string
+			if err := row.Scan(&custName, &custLimit, &custBalance, &gstinVal, &stateVal); err != nil {
+				if errors.Is(err, pgx.ErrNoRows) {
+					return models.NewValidationError("customer does not belong to this store")
+				}
+				return err
+			}
+			custGSTIN, custState = gstinVal, stateVal
+			customerLocked = true
+			hasCustomerRow = true
+		} else if in.CustomerID != nil && *in.CustomerID != "" {
+			// Non-credit sale with a linked customer: read identity before
+			// batch locks to preserve Customer -> Batches ordering.
+			var gstinVal, stateVal *string
+			err := tx.QueryRow(ctx,
+				`SELECT gstin, state_code FROM customers WHERE id = $1 AND store_id = $2`,
+				*in.CustomerID, storeID).
+				Scan(&gstinVal, &stateVal)
+			if errors.Is(err, pgx.ErrNoRows) {
+				return models.NewValidationError("customer does not belong to this store")
+			}
+			if err != nil {
+				return err
+			}
+			custGSTIN, custState = gstinVal, stateVal
+			hasCustomerRow = true
+		}
+		_ = customerLocked
+		_ = hasCustomerRow
+
 		// Centralized deterministic locking (deadlock prevention + IDOR):
 		// LockBatchesForUpdate deduplicates, sorts lexicographically, and
 		// locks each batch strictly in that order while scoping every lock
@@ -275,30 +330,24 @@ func (r *SaleRepo) checkout(ctx context.Context, in *CheckoutInput, when time.Ti
 	//
 	// Walk-in (anonymous OTC) support: when customer_id is omitted, nil, or
 	// empty the transaction is a walk-in sale and no customer lookup runs.
-	// When customer_id IS provided it must satisfy
-	//   SELECT EXISTS(SELECT 1 FROM customers WHERE id = $1 AND store_id = $2)
-	// otherwise the request is rejected with 400 Bad Request (ValidationError,
-	// never a cross-tenant read).
+	// Customer identity (custGSTIN/custState) was already fetched above
+	// BEFORE batch locks to enforce Customer -> Batches lock ordering.
+	// B2B Place of Supply: if isB2B but place_of_supply was omitted,
+	// inherit the customer's state so an inter-state B2B is not silently
+	// billed as intra-state (CGST/SGST instead of IGST).
 	var customerGSTIN *string
-	if in.CustomerID != nil && *in.CustomerID != "" {
-		var custGSTIN *string
-		var custStateCode *string
-		err := tx.QueryRow(ctx,
-			`SELECT gstin, state_code FROM customers WHERE id = $1 AND store_id = $2`,
-			*in.CustomerID, storeID).
-			Scan(&custGSTIN, &custStateCode)
-		if errors.Is(err, pgx.ErrNoRows) {
-			return models.NewValidationError("customer does not belong to this store")
-		}
-		if err != nil {
-			return err
-		}
+	if hasCustomerRow {
 		if !isB2B {
 			if custGSTIN != nil && *custGSTIN != "" {
 				customerGSTIN = custGSTIN
 			}
-			if custStateCode != nil && buyerStateCode == "" {
-				buyerStateCode = *custStateCode
+			if custState != nil && buyerStateCode == "" {
+				buyerStateCode = *custState
+			}
+		} else {
+			// B2B: PoS fallback inherits customer state when payload omits it.
+			if custState != nil && buyerStateCode == "" {
+				buyerStateCode = *custState
 			}
 		}
 	}
@@ -313,9 +362,11 @@ func (r *SaleRepo) checkout(ctx context.Context, in *CheckoutInput, when time.Ti
 			customerStateCode = &buyerStateCode
 		}
 
-		// Calculate tax for each line using the tax engine
-		total := 0.0
-		discountTotal := 0.0
+		// Calculate tax for each line using the tax engine.
+		// All subtotal/discount aggregations use decimal + banker's rounding
+		// (tax.RoundMoney); floats are only produced at DB-write time.
+		totalD := decimal.Zero
+		discountTotalD := decimal.Zero
 		var taxLines []tax.TaxLineResult
 		hasTaxConfig := false
 		var priceIncludesTax bool
@@ -347,9 +398,10 @@ func (r *SaleRepo) checkout(ctx context.Context, in *CheckoutInput, when time.Ti
 
 			gross := float64(it.Quantity) * unitPrice
 			discAmount, discType, discValue := lineDiscount(gross, it.Discount)
-			net := round2(gross - discAmount)
-			total = round2(total + net)
-			discountTotal = round2(discountTotal + discAmount)
+			netD := tax.RoundMoney(decimal.NewFromFloat(gross).Sub(decimal.NewFromFloat(discAmount)))
+			totalD = tax.RoundMoney(totalD.Add(netD))
+			discountTotalD = tax.RoundMoney(discountTotalD.Add(decimal.NewFromFloat(discAmount)))
+			net, _ := netD.Float64()
 
 			li := models.SalesInvoiceItem{
 				MedicineID:     lb.MedicineID,
@@ -436,7 +488,10 @@ func (r *SaleRepo) checkout(ctx context.Context, in *CheckoutInput, when time.Ti
 			lineItems = append(lineItems, li)
 		}
 
-		// Compute invoice-level GST totals (single calculation for credit check + INSERT)
+		// Compute invoice-level GST totals (single calculation for credit check + INSERT).
+		// Floats for DB writes are produced here at the very end.
+		total, _ := totalD.Float64()
+		discountTotal, _ := discountTotalD.Float64()
 		var invoiceResult *tax.TaxInvoiceResult
 		chargeableTotal := total
 		if len(taxLines) > 0 && hasTaxConfig {
@@ -445,29 +500,17 @@ func (r *SaleRepo) checkout(ctx context.Context, in *CheckoutInput, when time.Ti
 			chargeableTotal, _ = invoiceResult.GrandTotal.Float64()
 		}
 
-		var customerName string
+		// Fail-fast credit check against the row locked BEFORE batch locks
+		// (canonical Customer -> Batches hierarchy). No second SELECT here.
 		if in.PaymentType == models.PaymentCredit {
-			// Serialized per-customer: the row lock held to commit below
-			// serializes concurrent credit sales against the same limit.
-			// Tenant-scoped so one store can never charge another's customer.
-			row := tx.QueryRow(ctx, `
-				SELECT name, credit_limit::float8, current_balance::float8
-				FROM customers WHERE id = $1 AND store_id = $2
-				FOR UPDATE`, *in.CustomerID, storeID)
-			var limit, balance float64
-			if err := row.Scan(&customerName, &limit, &balance); err != nil {
-				if errors.Is(err, pgx.ErrNoRows) {
-					return models.NewValidationError("customer does not belong to this store")
-				}
-				return err
-			}
-			if round2(balance+chargeableTotal) > limit {
+			projected := tax.RoundMoney(decimal.NewFromFloat(custBalance).Add(decimal.NewFromFloat(chargeableTotal)))
+			if projected.GreaterThan(decimal.NewFromFloat(custLimit)) {
 				return &models.CreditLimitExceededError{
 					CustomerID:   *in.CustomerID,
-					CustomerName: customerName,
-					Outstanding:  balance,
+					CustomerName: custName,
+					Outstanding:  custBalance,
 					InvoiceTotal: chargeableTotal,
-					CreditLimit:  limit,
+					CreditLimit:  custLimit,
 				}
 			}
 		}
@@ -635,7 +678,7 @@ func (r *SaleRepo) checkout(ctx context.Context, in *CheckoutInput, when time.Ti
 			if _, err := tx.Exec(ctx, `
 				INSERT INTO customer_ledger (customer_id, entry_type, amount, balance_after, notes)
 				VALUES ($1, 'CREDIT_SALE', $2, $3, $4)`,
-				*in.CustomerID, chargeableTotal, round2(newBalance),
+				*in.CustomerID, chargeableTotal, roundMoneyFloat(newBalance),
 				fmt.Sprintf("Invoice %s", inv.InvoiceNo)); err != nil {
 				return err
 			}

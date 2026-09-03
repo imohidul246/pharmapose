@@ -8,8 +8,10 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/shopspring/decimal"
 
 	"github.com/mohi/pms-marg-inspired/internal/models"
+	"github.com/mohi/pms-marg-inspired/internal/tax"
 )
 
 // GSTR2BBatchStatus values.
@@ -190,8 +192,8 @@ func (r *GSTR2BRepo) Import(ctx context.Context, storeID string, in *models.GSTR
 			Matched:          matched,
 			Unmatched:        unmatched,
 			AmountMismatch:   amountMismatch,
-			MatchedTaxable:   round2(matchedTaxable),
-			UnmatchedTaxable: round2(unmatchedTaxable),
+			MatchedTaxable:   tax.RoundMoney(decimal.NewFromFloat(matchedTaxable)).InexactFloat64(),
+			UnmatchedTaxable: tax.RoundMoney(decimal.NewFromFloat(unmatchedTaxable)).InexactFloat64(),
 		}
 		return nil
 	})

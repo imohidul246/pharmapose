@@ -9,6 +9,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/shopspring/decimal"
 
 	"github.com/mohi/pms-marg-inspired/internal/models"
 	"github.com/mohi/pms-marg-inspired/internal/tax"
@@ -243,8 +244,8 @@ func (r *CustomerRepo) RecordPayment(ctx context.Context, customerID string, amo
 		entry = &models.CustomerLedgerEntry{
 			CustomerID:   customerID,
 			EntryType:    "PAYMENT",
-			Amount:       -round2(amount),
-			BalanceAfter: round2(newBalance),
+			Amount:       tax.RoundMoney(decimal.NewFromFloat(-amount)).InexactFloat64(),
+			BalanceAfter: tax.RoundMoney(decimal.NewFromFloat(newBalance)).InexactFloat64(),
 			Notes:        notes,
 		}
 		err = tx.QueryRow(ctx, `

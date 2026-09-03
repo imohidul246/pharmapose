@@ -306,13 +306,28 @@ func (r *StockAuditRequestRepo) Get(ctx context.Context, storeID, requestID stri
 	return &req, items, nil
 }
 
-// List returns audit requests, optionally narrowed to one status.
-func (r *StockAuditRequestRepo) List(ctx context.Context, storeID, status string, limit int) ([]models.StockAuditRequest, error) {
-	if limit <= 0 || limit > 200 {
-		limit = 50
+// List returns a page of audit requests, optionally narrowed to one status,
+// plus the total matching count for pagination metadata.
+func (r *StockAuditRequestRepo) List(ctx context.Context, storeID, status string, limit, offset int) ([]models.StockAuditRequest, int64, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	if offset < 0 {
+		offset = 0
 	}
 	if status == "" || status == "ALL" {
 		status = ""
+	}
+	var total int64
+	if err := r.db.QueryRow(ctx, `
+		SELECT COUNT(*)
+		FROM stock_audit_requests r
+		WHERE r.store_id = $1 AND ($2 = '' OR r.status::text = $2)`,
+		storeID, status).Scan(&total); err != nil {
+		return nil, 0, err
 	}
 	rows, err := r.db.Query(ctx, `
 		SELECT r.id::text, r.store_id::text, r.requested_by::text, r.status::text, r.notes,
@@ -324,9 +339,9 @@ func (r *StockAuditRequestRepo) List(ctx context.Context, storeID, status string
 		LEFT JOIN users rv ON rv.id = r.reviewed_by
 		WHERE r.store_id = $1 AND ($2 = '' OR r.status::text = $2)
 		ORDER BY r.created_at DESC
-		LIMIT $3`, storeID, status, limit)
+		LIMIT $3 OFFSET $4`, storeID, status, limit, offset)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
 
@@ -336,11 +351,11 @@ func (r *StockAuditRequestRepo) List(ctx context.Context, storeID, status string
 		if err := rows.Scan(&req.ID, &req.StoreID, &req.RequestedBy, &req.Status, &req.Notes,
 			&req.JournalID, &req.ReviewedBy, &req.ReviewedAt, &req.RejectionReason,
 			&req.CreatedAt, &req.UpdatedAt, &req.RequesterName, &req.ReviewerName); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		out = append(out, req)
 	}
-	return out, rows.Err()
+	return out, total, rows.Err()
 }
 
 func (r *StockAuditRequestRepo) items(ctx context.Context, storeID, requestID string) ([]models.StockAuditRequestItem, error) {

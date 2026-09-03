@@ -5,8 +5,10 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/shopspring/decimal"
 
 	"github.com/mohi/pms-marg-inspired/internal/models"
+	"github.com/mohi/pms-marg-inspired/internal/tax"
 )
 
 type ReconcileRepo struct {
@@ -122,7 +124,7 @@ func (r *ReconcileRepo) applyReconcileCore(ctx context.Context, tx pgx.Tx, store
 		lb := locked[id]
 		variance := dedup[id] - lb.CurrentStock
 
-		costImpact := round2(float64(variance) * lb.PurchasePrice)
+		costImpact := tax.RoundMoney(decimal.NewFromInt(int64(variance)).Mul(decimal.NewFromFloat(lb.PurchasePrice))).InexactFloat64()
 
 		item := models.ReconciliationItem{
 			JournalID:        journal.ID,

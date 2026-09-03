@@ -8,8 +8,10 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/shopspring/decimal"
 
 	"github.com/mohi/pms-marg-inspired/internal/models"
+	"github.com/mohi/pms-marg-inspired/internal/tax"
 )
 
 // CreditNoteItemInput is one line being returned: the billed quantity and the
@@ -191,31 +193,38 @@ func (r *SaleRepo) CreateCreditNote(ctx context.Context, in *CreateCreditNoteInp
 
 		// 4. Compute credit totals pro-rata on billed qty (bonus units carry
 		// no commercial value, matching the checkout tax treatment).
+		// All money uses decimal + banker's rounding via the tax engine.
 		var (
-			gross, taxable, cgst, sgst, igst, cess, grand float64
+			grossD, taxableD, cgstD, sgstD, igstD, cessD, grandD decimal.Decimal
 		)
 		now := time.Now().UTC()
 		noteItems := make([]models.SalesCreditNoteItem, 0, len(in.Items))
 		for _, it := range in.Items {
 			o := orig[it.InvoiceItemID]
-			frac := 0.0
+			fracD := decimal.Zero
 			if o.quantity > 0 {
-				frac = float64(it.Quantity) / float64(o.quantity)
+				fracD = decimal.NewFromInt(int64(it.Quantity)).Div(decimal.NewFromInt(int64(o.quantity)))
 			}
-			taxablePart := o.taxable * frac
-			cgstPart := o.cgst * frac
-			sgstPart := o.sgst * frac
-			igstPart := o.igst * frac
-			cessPart := o.cess * frac
-			linePart := o.lineTotal * frac
-			grossPart := linePart // gross tracks the commercial value returned
-			gross += grossPart
-			taxable += taxablePart
-			cgst += cgstPart
-			sgst += sgstPart
-			igst += igstPart
-			cess += cessPart
-			grand += linePart
+			taxablePartD := decimal.NewFromFloat(o.taxable).Mul(fracD)
+			cgstPartD := decimal.NewFromFloat(o.cgst).Mul(fracD)
+			sgstPartD := decimal.NewFromFloat(o.sgst).Mul(fracD)
+			igstPartD := decimal.NewFromFloat(o.igst).Mul(fracD)
+			cessPartD := decimal.NewFromFloat(o.cess).Mul(fracD)
+			linePartD := decimal.NewFromFloat(o.lineTotal).Mul(fracD)
+			grossPartD := linePartD // gross tracks the commercial value returned
+			grossD = grossD.Add(grossPartD)
+			taxableD = taxableD.Add(taxablePartD)
+			cgstD = cgstD.Add(cgstPartD)
+			sgstD = sgstD.Add(sgstPartD)
+			igstD = igstD.Add(igstPartD)
+			cessD = cessD.Add(cessPartD)
+			grandD = grandD.Add(linePartD)
+			taxablePart, _ := tax.RoundMoney(taxablePartD).Float64()
+			cgstPart, _ := tax.RoundMoney(cgstPartD).Float64()
+			sgstPart, _ := tax.RoundMoney(sgstPartD).Float64()
+			igstPart, _ := tax.RoundMoney(igstPartD).Float64()
+			cessPart, _ := tax.RoundMoney(cessPartD).Float64()
+			linePart, _ := tax.RoundMoney(linePartD).Float64()
 			noteItems = append(noteItems, models.SalesCreditNoteItem{
 				InvoiceItemID: &it.InvoiceItemID,
 				MedicineID:    o.medicineID,
@@ -223,23 +232,24 @@ func (r *SaleRepo) CreateCreditNote(ctx context.Context, in *CreateCreditNoteInp
 				Quantity:      it.Quantity,
 				BonusQuantity: it.BonusQuantity,
 				HSNCode:       o.hsn,
-				TaxableValue:  round2(taxablePart),
+				TaxableValue:  taxablePart,
 				GSTRate:       o.gstRate,
-				CGSTAmount:    round2(cgstPart),
-				SGSTAmount:    round2(sgstPart),
-				IGSTAmount:    round2(igstPart),
-				CessAmount:    round2(cessPart),
-				LineTotal:     round2(linePart),
+				CGSTAmount:    cgstPart,
+				SGSTAmount:    sgstPart,
+				IGSTAmount:    igstPart,
+				CessAmount:    cessPart,
+				LineTotal:     linePart,
 			})
 		}
-		gross = round2(gross)
-		taxable = round2(taxable)
-		cgst = round2(cgst)
-		sgst = round2(sgst)
-		igst = round2(igst)
-		cess = round2(cess)
-		taxTotal := round2(cgst + sgst + igst + cess)
-		grand = round2(grand)
+		gross, _ := tax.RoundMoney(grossD).Float64()
+		taxable, _ := tax.RoundMoney(taxableD).Float64()
+		cgst, _ := tax.RoundMoney(cgstD).Float64()
+		sgst, _ := tax.RoundMoney(sgstD).Float64()
+		igst, _ := tax.RoundMoney(igstD).Float64()
+		cess, _ := tax.RoundMoney(cessD).Float64()
+		taxTotalD := tax.RoundMoney(decimal.NewFromFloat(cgst).Add(decimal.NewFromFloat(sgst)).Add(decimal.NewFromFloat(igst)).Add(decimal.NewFromFloat(cess)))
+		taxTotal, _ := taxTotalD.Float64()
+		grand, _ := tax.RoundMoney(grandD).Float64()
 
 		noteNo, noteFY, err := r.seq.NextCreditNoteNumberAt(ctx, tx, storeID, now)
 		if err != nil {

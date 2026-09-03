@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/shopspring/decimal"
 
 	"github.com/mohi/pms-marg-inspired/internal/auth"
 	"github.com/mohi/pms-marg-inspired/internal/database"
@@ -303,7 +304,7 @@ resetDatabase(ctx, pool)
 			if bs.inter {
 				pos = "06"
 			}
-			wholesale := round2(batch.SalePrice * 0.88)
+			wholesale := roundMoney(batch.SalePrice * 0.88)
 			in := &repository.CheckoutInput{
 				PaymentType:   models.PaymentCredit,
 				CustomerID:    &cust.ID,
@@ -627,4 +628,8 @@ func derefStr(p *string) string {
 	}
 	return *p
 }
-func round2(v float64) float64 { return float64(int(v*100+0.5)) / 100 }
+
+// roundMoney is banker's rounding via the tax engine (seed pricing only).
+func roundMoney(v float64) float64 {
+	return tax.RoundMoney(decimal.NewFromFloat(v)).InexactFloat64()
+}

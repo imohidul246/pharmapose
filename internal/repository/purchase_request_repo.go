@@ -222,15 +222,30 @@ func (r *PurchaseRequestRepo) Get(ctx context.Context, storeID, requestID string
 	return &req, nil
 }
 
-// List returns requests for the store, optionally narrowed to one status.
-// snapshots and reviewer names are included so the review screens have
+// List returns a page of requests for the store, optionally narrowed to one
+// status, plus the total matching count for pagination metadata.
+// Snapshots and reviewer names are included so the review screens have
 // everything in a single call.
-func (r *PurchaseRequestRepo) List(ctx context.Context, storeID, status string, limit int) ([]models.PurchaseRequest, error) {
-	if limit <= 0 || limit > 200 {
-		limit = 50
+func (r *PurchaseRequestRepo) List(ctx context.Context, storeID, status string, limit, offset int) ([]models.PurchaseRequest, int64, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	if offset < 0 {
+		offset = 0
 	}
 	if status == "" || status == "ALL" {
 		status = ""
+	}
+	var total int64
+	if err := r.db.QueryRow(ctx, `
+		SELECT COUNT(*)
+		FROM purchase_requests r
+		WHERE r.store_id = $1 AND ($2 = '' OR r.status::text = $2)`,
+		storeID, status).Scan(&total); err != nil {
+		return nil, 0, err
 	}
 	rows, err := r.db.Query(ctx, `
 		SELECT r.id::text, r.store_id::text, r.requested_by::text, r.status::text,
@@ -243,9 +258,9 @@ func (r *PurchaseRequestRepo) List(ctx context.Context, storeID, status string, 
 		LEFT JOIN users rv ON rv.id = r.reviewed_by
 		WHERE r.store_id = $1 AND ($2 = '' OR r.status::text = $2)
 		ORDER BY r.created_at DESC
-		LIMIT $3`, storeID, status, limit)
+		LIMIT $3 OFFSET $4`, storeID, status, limit, offset)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
 
@@ -257,13 +272,13 @@ func (r *PurchaseRequestRepo) List(ctx context.Context, storeID, status string, 
 			&snapshot, &req.PurchaseID, &req.ReviewedBy,
 			&req.ReviewedAt, &req.RejectionReason, &req.CreatedAt, &req.UpdatedAt,
 			&req.RequesterName, &req.ReviewerName); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		req.PurchaseSnapshot = snapshot
 		out = append(out, req)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	return out, nil
+	return out, total, nil
 }

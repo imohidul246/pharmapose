@@ -193,23 +193,27 @@ func (r *PurchaseRepo) createInwardTx(ctx context.Context, tx pgx.Tx, in *Purcha
 	}
 	supplyType = tax.DetermineSupplyType(storeStateCode, posStateCode)
 
-	total := 0.0
+	totalD := decimal.Zero
 	for i := range in.Items {
 		it := in.Items[i]
 		gross := float64(it.Quantity) * it.PurchasePrice
 		discAmount, discType, discValue := lineDiscount(gross, &LineDiscount{Type: it.DiscountType, Value: it.DiscountValue})
-		net := round2(gross - discAmount)
-		total = round2(total + net)
+		netD := tax.RoundMoney(decimal.NewFromFloat(gross).Sub(decimal.NewFromFloat(discAmount)))
+		totalD = tax.RoundMoney(totalD.Add(netD))
 
 		// Effective per-unit purchase price after discount (for batch storage).
 		// Uses blended cost: total paid / total received (including bonus).
+		// Inventory valuation only — GST tax base strictly uses the billed
+		// PurchasePrice (see fillTaxLine), never this blended price.
 		totalReceived := it.Quantity + it.BonusQuantity
 		effectivePrice := it.PurchasePrice
 		if totalReceived > 0 {
 			if discAmount > 0 {
-				effectivePrice = round2((gross - discAmount) / float64(totalReceived))
+				effD := tax.RoundMoney(decimal.NewFromFloat(gross).Sub(decimal.NewFromFloat(discAmount)).Div(decimal.NewFromInt(int64(totalReceived))))
+				effectivePrice, _ = effD.Float64()
 			} else if it.BonusQuantity > 0 {
-				effectivePrice = round2(gross / float64(totalReceived))
+				effD := tax.RoundMoney(decimal.NewFromFloat(gross).Div(decimal.NewFromInt(int64(totalReceived))))
+				effectivePrice, _ = effD.Float64()
 			}
 		}
 
@@ -237,7 +241,8 @@ func (r *PurchaseRepo) createInwardTx(ctx context.Context, tx pgx.Tx, in *Purcha
 
 		lineResults = append(lineResults, lr)
 	}
-	total = round2(total - in.DiscountTotal)
+	totalD = tax.RoundMoney(totalD.Sub(decimal.NewFromFloat(in.DiscountTotal)))
+	total, _ := totalD.Float64()
 
 	var (
 		po    models.PurchaseOrder
@@ -571,10 +576,14 @@ func (r *PurchaseRepo) taxLineFromTx(ctx context.Context, tx pgx.Tx, storeID str
 func fillTaxLine(lr *lineResult, cfg *models.MedicineTaxConfig, supplyType tax.SupplyType) {
 	lr.hsnCode = cfg.HSNCode
 	lr.priceIncludesTax = cfg.PriceIncludesTax
+	// GST valuation: tax applies to the transaction value of billed goods
+	// only (quantity x pre-bonus PurchasePrice less discount). The blended
+	// effectivePrice (incl. bonus) is for inventory valuation and MUST NOT
+	// enter the tax engine.
 	taxInput := tax.TaxInput{
-		Quantity:         decimal.NewFromInt(int64(lr.input.Quantity)),
-		UnitPrice:        decimal.NewFromFloat(lr.input.PurchasePrice),
-		DiscountAmount:   decimal.NewFromFloat(lr.discAmt),
+		Quantity:       decimal.NewFromInt(int64(lr.input.Quantity)),
+		UnitPrice:      decimal.NewFromFloat(lr.input.PurchasePrice),
+		DiscountAmount: decimal.NewFromFloat(lr.discAmt),
 		TaxRate: tax.TaxRate{
 			GSTRate:  decimal.NewFromFloat(cfg.TaxRate.GSTRate),
 			CGSTRate: decimal.NewFromFloat(cfg.TaxRate.CGSTRate),

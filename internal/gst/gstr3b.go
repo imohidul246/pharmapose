@@ -6,6 +6,9 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/shopspring/decimal"
+
+	"github.com/mohi/pms-marg-inspired/internal/tax"
 )
 
 // TaxTotals is a set of monetary GST totals for one table/section of a return.
@@ -21,14 +24,15 @@ type TaxTotals struct {
 }
 
 // taxTotalsFromHeads assembles a TaxTotals row, computing Total.
+// Rounding is banker's (round-half-even) via the tax engine.
 func taxTotalsFromHeads(taxable, igst, cgst, sgst, cess float64) TaxTotals {
 	return TaxTotals{
-		TaxableValue: round2(taxable),
-		IGST:         round2(igst),
-		CGST:         round2(cgst),
-		SGST:         round2(sgst),
-		Cess:         round2(cess),
-		Total:        round2(igst + cgst + sgst + cess),
+		TaxableValue: roundMoney(taxable),
+		IGST:         roundMoney(igst),
+		CGST:         roundMoney(cgst),
+		SGST:         roundMoney(sgst),
+		Cess:         roundMoney(cess),
+		Total:        roundMoney(igst + cgst + sgst + cess),
 	}
 }
 
@@ -278,8 +282,8 @@ func computeNetLiability(outward, rc, itc TaxTotals) NetLiabilityTotals {
 		SGST: outward.SGST + rc.SGST,
 		Cess: outward.Cess + rc.Cess,
 	}
-	liability.TaxableValue = round2(outward.TaxableValue + rc.TaxableValue)
-	liability.Total = round2(liability.IGST + liability.CGST + liability.SGST + liability.Cess)
+	liability.TaxableValue = roundMoney(outward.TaxableValue + rc.TaxableValue)
+	liability.Total = roundMoney(liability.IGST + liability.CGST + liability.SGST + liability.Cess)
 
 	igstLiab := liability.IGST
 	cgstLiab := liability.CGST
@@ -331,12 +335,12 @@ func computeNetLiability(outward, rc, itc TaxTotals) NetLiabilityTotals {
 	}
 
 	payable := TaxTotals{
-		IGST: round2(igstLiab),
-		CGST: round2(cgstLiab),
-		SGST: round2(sgstLiab),
-		Cess: round2(maxf(0, liability.Cess-itc.Cess)),
+		IGST: roundMoney(igstLiab),
+		CGST: roundMoney(cgstLiab),
+		SGST: roundMoney(sgstLiab),
+		Cess: roundMoney(maxf(0, liability.Cess-itc.Cess)),
 	}
-	payable.Total = round2(payable.IGST + payable.CGST + payable.SGST + payable.Cess)
+	payable.Total = roundMoney(payable.IGST + payable.CGST + payable.SGST + payable.Cess)
 
 	return NetLiabilityTotals{
 		Liability: liability,
@@ -359,9 +363,9 @@ func maxf(a, b float64) float64 {
 	return b
 }
 
-// round2 clamps monetary math to two decimals.
-func round2(v float64) float64 {
-	return float64(int(v*100+0.5)) / 100
+// roundMoney rounds to 2 decimals with banker's rounding via the tax engine.
+func roundMoney(v float64) float64 {
+	return tax.RoundMoney(decimal.NewFromFloat(v)).InexactFloat64()
 }
 
 // modelsNewValidationError creates a validation-style error, matching the
