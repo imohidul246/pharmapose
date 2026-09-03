@@ -62,9 +62,9 @@ func (s *InvoiceSequence) NextInvoiceNumberAt(ctx context.Context, tx pgx.Tx, st
 	// If no store_id, use an in-memory atomic fallback (for tests/legacy)
 	if storeID == "" {
 		seq := s.fallbackSeq.Add(1)
-		invoiceNo := fmt.Sprintf("%s%s/%05d", prefix, formatFY(fy), seq)
-		if len(invoiceNo) > 16 {
-			return "", fy, fmt.Errorf("generated invoice number %q exceeds 16 characters (CGST Rule 46(b))", invoiceNo)
+		invoiceNo, err := FormatInvoiceNumber(seriesCode(prefix), formatFY(fy), int(seq))
+		if err != nil {
+			return "", fy, err
 		}
 		return invoiceNo, fy, nil
 	}
@@ -91,10 +91,9 @@ func (s *InvoiceSequence) NextInvoiceNumberAt(ctx context.Context, tx pgx.Tx, st
 		return "", fy, fmt.Errorf("increment invoice sequence: %w", err)
 	}
 
-	invoiceNo := fmt.Sprintf("%s%s/%05d", prefix, formatFY(fy), nextVal)
-	// CGST Rule 46(b): invoice numbers must not exceed 16 characters.
-	if len(invoiceNo) > 16 {
-		return "", fy, fmt.Errorf("generated invoice number %q exceeds 16 characters (CGST Rule 46(b))", invoiceNo)
+	invoiceNo, err := FormatInvoiceNumber(seriesCode(prefix), formatFY(fy), nextVal)
+	if err != nil {
+		return "", fy, err
 	}
 	return invoiceNo, fy, nil
 }
@@ -120,4 +119,30 @@ func formatFY(fy string) string {
 		return fy[2:]
 	}
 	return fy
+}
+
+// FormatInvoiceNumber renders a statutory serial in the compact form
+// [ShortStoreCode]/[FY]/[Seq] (e.g. S1/26-27/000001 = 15 chars) and rejects
+// anything exceeding the CGST Rule 46(b) 16-character limit before it can be
+// committed. seq is zero-padded to at least 5 digits and grows naturally
+// past 99999 (the length guard, not truncation, is what keeps overflow safe).
+func FormatInvoiceNumber(storeCode, fyShort string, seq int) (string, error) {
+	invoiceNo := fmt.Sprintf("%s/%s/%05d", storeCode, fyShort, seq)
+	if len(invoiceNo) > 16 {
+		return "", fmt.Errorf("invoice number '%s' exceeds statutory 16-character limit", invoiceNo)
+	}
+	return invoiceNo, nil
+}
+
+// seriesCode trims a sequence prefix ("INV/", "CN/") to its short series code
+// ("INV", "CN") for FormatInvoiceNumber.
+func seriesCode(prefix string) string {
+	code := prefix
+	for len(code) > 0 && code[len(code)-1] == '/' {
+		code = code[:len(code)-1]
+	}
+	if code == "" {
+		return "INV"
+	}
+	return code
 }

@@ -2,8 +2,6 @@ package repository
 
 import (
 	"context"
-	"errors"
-	"sort"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -95,35 +93,12 @@ func reconcileItems(items []ReconcileItemInput) (map[string]int, []string) {
 // transaction. It is the single code path used by direct owner reconciliations
 // and by approved stock-audit requests, so both record variances identically.
 func (r *ReconcileRepo) applyReconcileCore(ctx context.Context, tx pgx.Tx, storeID string, verifiedBy *string, notes string, dedup map[string]int, order []string) (*models.ReconciliationJournal, []models.ReconciliationItem, error) {
-	// Deterministic lock ordering: sort batch IDs lexicographically and lock
-	// each row individually in that order (see Checkout). This prevents
-	// lock-order-inversion deadlocks when concurrent reconciliations/checkouts
-	// touch overlapping batches.
-	batchIDs := append([]string(nil), order...)
-	sort.Strings(batchIDs)
-
-	type lockedBatch struct {
-		medicineID    string
-		batchNumber   string
-		systemStock   int
-		purchasePrice float64
-	}
-	locked := make(map[string]lockedBatch, len(batchIDs))
-	for _, id := range batchIDs {
-		var lb lockedBatch
-		err := tx.QueryRow(ctx, `
-			SELECT b.medicine_id::text, b.batch_number, b.current_stock, b.purchase_price::float8
-			FROM batches b
-			WHERE b.id = $1 AND b.store_id = $2
-			FOR UPDATE`, id, storeID).Scan(
-			&lb.medicineID, &lb.batchNumber, &lb.systemStock, &lb.purchasePrice)
-		if err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				return nil, nil, models.ErrNotFound
-			}
-			return nil, nil, err
-		}
-		locked[id] = lb
+	// Centralized deterministic locking: LockBatchesForUpdate sorts and locks
+	// in canonical order (deadlock-safe vs concurrent checkouts) and scopes
+	// every lock to this store.
+	locked, err := LockBatchesForUpdate(ctx, tx, storeID, append([]string(nil), order...))
+	if err != nil {
+		return nil, nil, err
 	}
 
 	for _, id := range order {
@@ -133,32 +108,31 @@ func (r *ReconcileRepo) applyReconcileCore(ctx context.Context, tx pgx.Tx, store
 	}
 
 	journal := models.ReconciliationJournal{}
-	err := tx.QueryRow(ctx, `
+	if err := tx.QueryRow(ctx, `
 		INSERT INTO reconciliation_journals (store_id, verified_by_user_id, notes)
 		VALUES ($1, $2, $3)
 		RETURNING id::text, verified_by_user_id, notes, created_at`,
 		storeID, verifiedBy, notes,
-	).Scan(&journal.ID, &journal.VerifiedByUserID, &journal.Notes, &journal.CreatedAt)
-	if err != nil {
+	).Scan(&journal.ID, &journal.VerifiedByUserID, &journal.Notes, &journal.CreatedAt); err != nil {
 		return nil, nil, err
 	}
 
 	items := make([]models.ReconciliationItem, 0, len(order))
 	for _, id := range order {
 		lb := locked[id]
-		variance := dedup[id] - lb.systemStock
+		variance := dedup[id] - lb.CurrentStock
 
-		costImpact := round2(float64(variance) * lb.purchasePrice)
+		costImpact := round2(float64(variance) * lb.PurchasePrice)
 
 		item := models.ReconciliationItem{
 			JournalID:        journal.ID,
-			MedicineID:       lb.medicineID,
+			MedicineID:       lb.MedicineID,
 			BatchID:          id,
-			SystemStock:      lb.systemStock,
+			SystemStock:      lb.CurrentStock,
 			PhysicalStock:    dedup[id],
 			VarianceQuantity: variance,
 			CostImpact:       costImpact,
-			BatchNumber:      lb.batchNumber,
+			BatchNumber:      lb.BatchNumber,
 		}
 		err := tx.QueryRow(ctx, `
 			INSERT INTO reconciliation_items

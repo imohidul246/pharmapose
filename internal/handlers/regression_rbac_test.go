@@ -28,6 +28,8 @@ func TestCashierForbiddenOnSensitiveRoutes(t *testing.T) {
 		{http.MethodGet, "/api/reports/low-stock", nil},
 		{http.MethodPost, "/api/inventory/reconcile", map[string]interface{}{"items": []interface{}{}}},
 		{http.MethodGet, "/api/inventory/reconciliations", nil},
+		{http.MethodPost, "/api/reconcile", map[string]interface{}{"items": []interface{}{}}},
+		{http.MethodGet, "/api/reconcile", nil},
 	}
 	for _, tc := range sensitive {
 		rec := doJSONAs(t, tc.method, tc.path, tc.body, employeeRawToken)

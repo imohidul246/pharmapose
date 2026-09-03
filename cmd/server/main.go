@@ -57,7 +57,7 @@ func main() {
 	cookieOptions := auth.CookieOptions{Secure: os.Getenv("PMS_COOKIE_SECURE") == "1"}
 	devOrigins := []string{"http://localhost:5173"}
 
-	supplierRepo := repository.NewSupplierRepo(pool, storeID)
+	supplierRepo := repository.NewSupplierRepo(pool)
 	taxRepo := repository.NewTaxRepo(pool)
 
 	router := handlers.NewRouter(handlers.Deps{

@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"errors"
+	"sort"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -10,6 +11,78 @@ import (
 
 	"github.com/mohi/pms-marg-inspired/internal/models"
 )
+
+// LockedBatch is a tenant-verified batch row held under SELECT ... FOR UPDATE
+// by LockBatchesForUpdate. It carries every column the locked writers need
+// (checkout pricing + UQC snapshot, reconcile costing, audit naming) so all
+// batch-mutating flows share one lock path and one snapshot shape.
+type LockedBatch struct {
+	ID            string
+	MedicineID    string
+	MedicineName  string
+	BatchNumber   string
+	SalePrice     float64
+	PurchasePrice float64
+	CurrentStock  int
+	UQC           string
+}
+
+// LockBatchesForUpdate is the single, shared batch-locking utility for every
+// transaction that mutates stock (checkout, reconciliations, stock audits, PO
+// adjustments). Before touching the database it deduplicates batchIDs and
+// sorts them in strict lexicographical order, then locks each row
+// individually in that order:
+//
+//	sort.Slice(batchIDs, func(i, j int) bool { return batchIDs[i] < batchIDs[j] })
+//	// SELECT ... FROM batches WHERE id = $1 AND store_id = $2 FOR UPDATE
+//
+// Locking in a canonical order — never in client payload order — is what
+// eliminates lock-order-inversion deadlocks (PostgreSQL 40P01) when concurrent
+// transactions touch overlapping batches in different orders.
+//
+// Tenant isolation is enforced per row (store_id = $2): a batch belonging to
+// another store matches nothing and is simply absent from the returned map,
+// so callers can never lock, read, or mutate foreign stock. Query failures
+// abort with an error; absent IDs do not.
+func LockBatchesForUpdate(ctx context.Context, tx pgx.Tx, storeID string, batchIDs []string) (map[string]LockedBatch, error) {
+	seen := make(map[string]struct{}, len(batchIDs))
+	unique := make([]string, 0, len(batchIDs))
+	for _, id := range batchIDs {
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; !ok {
+			seen[id] = struct{}{}
+			unique = append(unique, id)
+		}
+	}
+	sort.Slice(unique, func(i, j int) bool { return unique[i] < unique[j] })
+
+	locked := make(map[string]LockedBatch, len(unique))
+	for _, id := range unique {
+		var lb LockedBatch
+		err := tx.QueryRow(ctx, `
+			SELECT b.id::text, b.medicine_id::text, m.name, b.batch_number,
+			       b.sale_price::float8, b.purchase_price::float8, b.current_stock,
+			       COALESCE(m.uqc, 'OTH')
+			FROM batches b
+			JOIN medicines m ON m.id = b.medicine_id
+			WHERE b.id = $1 AND b.store_id = $2
+			FOR UPDATE`, id, storeID).Scan(
+			&lb.ID, &lb.MedicineID, &lb.MedicineName, &lb.BatchNumber,
+			&lb.SalePrice, &lb.PurchasePrice, &lb.CurrentStock, &lb.UQC)
+		if errors.Is(err, pgx.ErrNoRows) {
+			// Unknown ID or foreign-tenant batch: absent by design (no
+			// oracle). Callers map absence to their domain error.
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		locked[id] = lb
+	}
+	return locked, nil
+}
 
 type MedicineRepo struct {
 	db    *pgxpool.Pool

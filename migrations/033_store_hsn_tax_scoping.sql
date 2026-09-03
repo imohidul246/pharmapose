@@ -13,9 +13,20 @@ ALTER TABLE tax_rates
 ALTER TABLE medicine_tax_config
     ADD COLUMN store_id UUID REFERENCES stores(id) ON DELETE CASCADE;
 
-UPDATE hsn_codes            SET store_id = (SELECT id FROM stores ORDER BY created_at LIMIT 1) WHERE store_id IS NULL;
-UPDATE tax_rates            SET store_id = (SELECT id FROM stores ORDER BY created_at LIMIT 1) WHERE store_id IS NULL;
-UPDATE medicine_tax_config  SET store_id = (SELECT id FROM stores ORDER BY created_at LIMIT 1) WHERE store_id IS NULL;
+UPDATE hsn_codes            SET store_id = (SELECT id FROM stores ORDER BY created_at LIMIT 1) WHERE store_id IS NULL AND EXISTS (SELECT 1 FROM stores);
+UPDATE tax_rates            SET store_id = (SELECT id FROM stores ORDER BY created_at LIMIT 1) WHERE store_id IS NULL AND EXISTS (SELECT 1 FROM stores);
+UPDATE medicine_tax_config  SET store_id = (SELECT id FROM stores ORDER BY created_at LIMIT 1) WHERE store_id IS NULL AND EXISTS (SELECT 1 FROM stores);
+
+-- Fresh-install path: when zero stores exist yet (production boot migrates
+-- before the first /api/auth/register), the pre-tenancy seed rows from 021
+-- cannot belong to any tenant and store-scoped queries could never see them.
+-- Drop those orphan seeds so the NOT NULL invariant below holds on fresh
+-- databases too; per-store HSN/tax masters are created via the API (or
+-- cmd/seed) once the first store exists. Upgraded databases always have a
+-- store here, so their adopted rows are untouched.
+DELETE FROM medicine_tax_config WHERE store_id IS NULL;
+DELETE FROM tax_rates            WHERE store_id IS NULL;
+DELETE FROM hsn_codes            WHERE store_id IS NULL;
 
 ALTER TABLE hsn_codes            ALTER COLUMN store_id SET NOT NULL;
 ALTER TABLE tax_rates            ALTER COLUMN store_id SET NOT NULL;

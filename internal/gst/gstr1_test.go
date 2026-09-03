@@ -9,7 +9,6 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/mohi/pms-marg-inspired/internal/database"
 	"github.com/mohi/pms-marg-inspired/internal/gst"
 	"github.com/mohi/pms-marg-inspired/internal/models"
 	"github.com/mohi/pms-marg-inspired/internal/repository"
@@ -26,19 +25,11 @@ var (
 
 func TestMain(m *testing.M) {
 	ctx := context.Background()
-	url := os.Getenv("TEST_DATABASE_URL")
-	if url == "" {
-		url = "postgres://postgres:postgres@localhost:5432/pms_test?sslmode=disable"
-	}
 
 	var err error
-	pool, err = database.Connect(ctx, url)
+	pool, err = testutil.ConnectTestDB(ctx, "gst")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "connect test db: %v\n", err)
-		os.Exit(1)
-	}
-	if err := database.Migrate(ctx, pool); err != nil {
-		fmt.Fprintf(os.Stderr, "migrate: %v\n", err)
 		os.Exit(1)
 	}
 	if err := testutil.SeedStore(ctx, pool); err != nil {

@@ -14,7 +14,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/mohi/pms-marg-inspired/internal/auth"
-	"github.com/mohi/pms-marg-inspired/internal/database"
 	"github.com/mohi/pms-marg-inspired/internal/gst"
 	"github.com/mohi/pms-marg-inspired/internal/models"
 	"github.com/mohi/pms-marg-inspired/internal/repository"
@@ -33,18 +32,10 @@ var (
 
 func TestMain(m *testing.M) {
 	ctx := context.Background()
-	url := os.Getenv("TEST_DATABASE_URL")
-	if url == "" {
-		url = "postgres://postgres:postgres@localhost:5432/pms_test?sslmode=disable"
-	}
 	var err error
-	testPoolDB, err = database.Connect(ctx, url)
+	testPoolDB, err = testutil.ConnectTestDB(ctx, "handlers")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "connect handlers test db: %v\n", err)
-		os.Exit(1)
-	}
-	if err := database.Migrate(ctx, testPoolDB); err != nil {
-		fmt.Fprintf(os.Stderr, "migrate: %v\n", err)
 		os.Exit(1)
 	}
 	_, err = testPoolDB.Exec(ctx, `
@@ -85,7 +76,7 @@ func TestMain(m *testing.M) {
 		PurchaseRepo:          repository.NewPurchaseRepo(testPoolDB),
 		ReconcileRepo:         repository.NewReconcileRepo(testPoolDB),
 		ReportRepo:            repository.NewReportRepo(testPoolDB),
-		SupplierRepo:          repository.NewSupplierRepo(testPoolDB, testutil.StoreID),
+		SupplierRepo:          repository.NewSupplierRepo(testPoolDB),
 		TaxRepo:               repository.NewTaxRepo(testPoolDB),
 		GSTHandler:            gst.NewHandler(testPoolDB),
 	})

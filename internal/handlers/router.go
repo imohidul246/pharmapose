@@ -134,6 +134,15 @@ func NewRouter(d Deps) *gin.Engine {
 			inv.GET("/reconciliations", auth.RequireRole(auth.RoleAdmin, auth.RoleStoreManager), d.listReconciliations)
 		}
 
+		// Canonical reconcile route group (alias of the inventory
+		// reconciliation endpoints above): same handlers, same
+		// admin/manager-only guards.
+		reconcile := protected.Group("/reconcile")
+		{
+			reconcile.POST("", auth.RequireRole(auth.RoleAdmin, auth.RoleStoreManager), d.reconcile)
+			reconcile.GET("", auth.RequireRole(auth.RoleAdmin, auth.RoleStoreManager), d.listReconciliations)
+		}
+
 		meds := protected.Group("/medicines")
 		{
 			meds.GET("", auth.RequirePermission(auth.PermStockView), d.listMedicines)

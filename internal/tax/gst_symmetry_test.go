@@ -9,7 +9,7 @@ import (
 // TestIntraStateGSTSymmetryOddValue is the GSTN portal compliance regression:
 // for intra-state sales the line-item CGST MUST strictly equal SGST, even on
 // odd-paisa taxes where rounding the total first would split asymmetrically.
-func TestIntraStateGSTSymmetryOddValue(t *testing.T) {
+func TestGSTSymmetryOddValues(t *testing.T) {
 	// Rs 13.75 at 5% GST: half-rate 2.5% -> 13.75*2.5/100 = 0.34375 -> 0.34.
 	result := tax.CalculateLineTax(tax.TaxInput{
 		Quantity:         d("1"),
@@ -36,6 +36,7 @@ func TestIntraStateGSTSymmetryOddValue(t *testing.T) {
 	// for every one.
 	cases := []struct{ taxable, rate string }{
 		{"13.75", "5"},
+		{"27.49", "5"},
 		{"1.00", "5"},
 		{"0.50", "12"},
 		{"99.99", "18"},
@@ -71,5 +72,23 @@ func TestIntraStateGSTSymmetryOddValue(t *testing.T) {
 	})
 	if incl.CGSTAmount.Cmp(incl.SGSTAmount) != 0 {
 		t.Errorf("tax-inclusive: CGST(%s) != SGST(%s)", incl.CGSTAmount, incl.SGSTAmount)
+	}
+
+	// Integer-paise core: the mirrored split helper itself.
+	cgst, sgst, total := tax.SplitIntraStatePaise(1375, 5.0)
+	if cgst != sgst || cgst+sgst != total {
+		t.Errorf("SplitIntraStatePaise(1375, 5) = %d/%d/%d: must mirror", cgst, sgst, total)
+	}
+	if cgst != 34 {
+		t.Errorf("SplitIntraStatePaise(1375, 5) cgst = %d want 34", cgst)
+	}
+	if got := tax.IGSTPaise(1375, 5.0); got != 69 {
+		t.Errorf("IGSTPaise(1375, 5) = %d want 69", got)
+	}
+	if got := tax.RoundHalfEven(2.5); got != 2 {
+		t.Errorf("RoundHalfEven(2.5) = %d want 2 (banker's)", got)
+	}
+	if got := tax.RoundHalfEven(3.5); got != 4 {
+		t.Errorf("RoundHalfEven(3.5) = %d want 4 (banker's)", got)
 	}
 }

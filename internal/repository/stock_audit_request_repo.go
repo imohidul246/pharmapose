@@ -64,23 +64,20 @@ func (r *StockAuditRequestRepo) Create(ctx context.Context, storeID, requestedBy
 			dedup[it.BatchID] = it
 		}
 
+		// Centralized deterministic locking (canonical order, store-scoped).
+		locked, err := LockBatchesForUpdate(ctx, tx, storeID, order)
+		if err != nil {
+			return err
+		}
+
 		for _, batchID := range order {
 			it := dedup[batchID]
-			var medicineID, batchNumber, medicineName string
-			var systemStock int
-			err := tx.QueryRow(ctx, `
-				SELECT m.id::text, m.name, b.batch_number, b.current_stock
-				FROM batches b
-				JOIN medicines m ON m.id = b.medicine_id
-				WHERE b.id = $1 AND b.store_id = $2
-				FOR UPDATE OF b`, batchID, storeID).
-				Scan(&medicineID, &medicineName, &batchNumber, &systemStock)
-			if errors.Is(err, pgx.ErrNoRows) {
+			lb, ok := locked[batchID]
+			if !ok {
 				return fmt.Errorf("batch %s not found in store", batchID)
 			}
-			if err != nil {
-				return err
-			}
+			medicineID, medicineName, batchNumber, systemStock :=
+				lb.MedicineID, lb.MedicineName, lb.BatchNumber, lb.CurrentStock
 
 			var itemID string
 			if err := tx.QueryRow(ctx, `

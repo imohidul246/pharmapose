@@ -121,8 +121,9 @@ func mustMedicineOfBatch(t *testing.T, batchID string) string {
 }
 
 // TestCrossStoreCustomerNotVisible proves customers are invisible across
-// stores: reads, payments and credit checkouts against a foreign customer ID
-// all fail with ErrNotFound instead of leaking balances or extending credit.
+// stores: reads and payments against a foreign customer ID fail with
+// ErrNotFound, while a checkout naming a foreign customer is rejected with
+// 400 Bad Request (ValidationError) — never leaking balances or credit.
 func TestCrossStoreCustomerNotVisible(t *testing.T) {
 	reset(t)
 	fx := seedFixture(t, 100, 100000)
@@ -138,15 +139,17 @@ func TestCrossStoreCustomerNotVisible(t *testing.T) {
 		t.Errorf("RecordPayment foreign customer = %v want ErrNotFound", err)
 	}
 
-	// A credit checkout naming store B's customer from store A must fail.
+	// A credit checkout naming store B's customer from store A must fail
+	// with 400 Bad Request.
 	_, err := saleRepo.Checkout(ctx, &repository.CheckoutInput{
 		StoreID:     sid(testutil.StoreID),
 		PaymentType: models.PaymentCredit,
 		CustomerID:  &customerB,
 		Items:       []repository.CheckoutItemInput{{BatchID: fx.BatchIDs[0], Quantity: 1}},
 	})
-	if err != models.ErrNotFound {
-		t.Errorf("credit checkout with foreign customer = %v want ErrNotFound", err)
+	var valErr *models.ValidationError
+	if !errorsAs(err, &valErr) {
+		t.Errorf("credit checkout with foreign customer = %v want 400 ValidationError", err)
 	}
 
 	// Store B's customer balance is untouched.

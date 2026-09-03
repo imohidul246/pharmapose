@@ -97,7 +97,7 @@ resetDatabase(ctx, pool)
 		log.Fatalf("seed team: %v", err)
 	}
 
-	supplierRepo := repository.NewSupplierRepo(pool, storeID)
+	supplierRepo := repository.NewSupplierRepo(pool)
 	medRepo := repository.NewMedicineRepo(pool, storeID)
 	purchaseRepo := repository.NewPurchaseRepo(pool)
 	customerRepo := repository.NewCustomerRepo(pool, storeID)
@@ -118,7 +118,7 @@ resetDatabase(ctx, pool)
 	}
 	supplierIDs := make([]string, 0, len(suppliers))
 	for i := range suppliers {
-		if err := supplierRepo.Create(ctx, &suppliers[i]); err != nil {
+		if err := supplierRepo.Create(ctx, storeID, &suppliers[i]); err != nil {
 			log.Fatalf("create supplier %s: %v", suppliers[i].LegalName, err)
 		}
 		supplierIDs = append(supplierIDs, suppliers[i].ID)
