@@ -19,10 +19,10 @@ func seedB2BInvoice(t *testing.T) string {
 	t.Helper()
 	ctx := context.Background()
 
-	medRepo := repository.NewMedicineRepo(testPoolDB, testutil.StoreID)
+	medRepo := repository.NewMedicineRepo(testPoolDB)
 	m := &models.Medicine{Name: "B2B PDF Med", SaltComposition: "Rx",
 		Manufacturer: "PDFPharma", MinReorderLevel: 5}
-	if err := medRepo.Create(ctx, m); err != nil {
+	if err := medRepo.Create(ctx, testutil.StoreID, m); err != nil {
 		t.Fatalf("create medicine: %v", err)
 	}
 	purchRepo := repository.NewPurchaseRepo(testPoolDB)
@@ -41,7 +41,7 @@ func seedB2BInvoice(t *testing.T) string {
 	}); err != nil {
 		t.Fatalf("inward: %v", err)
 	}
-	batch, err := medRepo.FindBatchByNumber(ctx, m.ID, "PDF-B1")
+	batch, err := medRepo.FindBatchByNumber(ctx, testutil.StoreID, m.ID, "PDF-B1")
 	if err != nil {
 		t.Fatalf("find batch: %v", err)
 	}

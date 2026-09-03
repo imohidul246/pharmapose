@@ -19,7 +19,7 @@ func seedTaxedBatch(t *testing.T, name, batchNo string, hsn *models.HSNCode, rat
 
 	m := &models.Medicine{Name: name, SaltComposition: "Rx",
 		Manufacturer: "CompliancePharma", MinReorderLevel: 5}
-	if err := medRepo.Create(ctx, m); err != nil {
+	if err := medRepo.Create(ctx, testutil.StoreID, m); err != nil {
 		t.Fatalf("create medicine: %v", err)
 	}
 	tr := repository.NewTaxRepo(pool)
@@ -42,7 +42,7 @@ func seedTaxedBatch(t *testing.T, name, batchNo string, hsn *models.HSNCode, rat
 	if _, _, err := purchRepo.CreateInward(ctx, in); err != nil {
 		t.Fatalf("inward: %v", err)
 	}
-	batch, err := medRepo.FindBatchByNumber(ctx, m.ID, batchNo)
+	batch, err := medRepo.FindBatchByNumber(ctx, testutil.StoreID, m.ID, batchNo)
 	if err != nil {
 		t.Fatalf("find batch: %v", err)
 	}
@@ -77,7 +77,7 @@ func TestBonusQuantityTaxAndStockDeduction(t *testing.T) {
 	}
 
 	// Physical deduction covers billed + bonus.
-	batch, _ := medRepo.FindBatchByNumber(ctx, mustMedicineOfBatch(t, batchID), "BONUS-C1")
+	batch, _ := medRepo.FindBatchByNumber(ctx, testutil.StoreID, mustMedicineOfBatch(t, batchID), "BONUS-C1")
 	if batch.CurrentStock != 88 {
 		t.Errorf("stock = %d want 88 (100 - 10 billed - 2 bonus)", batch.CurrentStock)
 	}
@@ -125,7 +125,7 @@ func TestBonusQuantityTaxAndStockDeduction(t *testing.T) {
 		t.Errorf("bonus GST != plain GST (bonus must not be taxed)")
 	}
 
-	batch, _ = medRepo.FindBatchByNumber(ctx, mustMedicineOfBatch(t, batchID), "BONUS-C1")
+	batch, _ = medRepo.FindBatchByNumber(ctx, testutil.StoreID, mustMedicineOfBatch(t, batchID), "BONUS-C1")
 	if batch.CurrentStock != 78 {
 		t.Errorf("stock = %d want 78 (88 - 10 plain)", batch.CurrentStock)
 	}

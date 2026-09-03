@@ -85,7 +85,7 @@ func (d PDFDeps) generateB2BInvoicePDF(c *gin.Context) {
 	// Fetch buyer/customer info when a customer is linked to the invoice.
 	buyer := pdf.BuyerInfo{}
 	if detail.Invoice.CustomerID != nil && *detail.Invoice.CustomerID != "" {
-		if cust, err := d.CustomerRepo.GetByID(c.Request.Context(), *detail.Invoice.CustomerID); err == nil && cust != nil {
+		if cust, err := d.CustomerRepo.GetByID(c.Request.Context(), storeIDFor(c), *detail.Invoice.CustomerID); err == nil && cust != nil {
 			buyer.Name = cust.Name
 			buyer.Phone = cust.Phone
 			if cust.GSTIN != nil {

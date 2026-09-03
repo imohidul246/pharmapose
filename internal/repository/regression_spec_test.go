@@ -157,7 +157,7 @@ func TestAnonymousCheckout(t *testing.T) {
 		t.Fatalf("foreign customer checkout = %v want 400 ValidationError", err)
 	}
 
-	batch, _ := medRepo.FindBatchByNumber(ctx, fx.MedicineID, "FIX-B1")
+	batch, _ := medRepo.FindBatchByNumber(ctx, testutil.StoreID, fx.MedicineID, "FIX-B1")
 	if batch.CurrentStock != 96 {
 		t.Errorf("stock = %d want 96 (only the 3+1 walk-in units deducted)", batch.CurrentStock)
 	}
@@ -172,7 +172,7 @@ func TestBatchLockingDeadlockSafety(t *testing.T) {
 
 	m := &models.Medicine{Name: "Deadlock Med", SaltComposition: "X",
 		Manufacturer: "DL-Pharma", MinReorderLevel: 5}
-	if err := medRepo.Create(ctx, m); err != nil {
+	if err := medRepo.Create(ctx, testutil.StoreID, m); err != nil {
 		t.Fatalf("create medicine: %v", err)
 	}
 	batchNos := []string{"DL-A", "DL-B", "DL-C"}
@@ -198,7 +198,7 @@ func TestBatchLockingDeadlockSafety(t *testing.T) {
 	}
 	ids := make([]string, 0, 3)
 	for _, bn := range batchNos {
-		b, err := medRepo.FindBatchByNumber(ctx, m.ID, bn)
+		b, err := medRepo.FindBatchByNumber(ctx, testutil.StoreID, m.ID, bn)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -236,7 +236,7 @@ func TestBatchLockingDeadlockSafety(t *testing.T) {
 	}
 
 	for j, bn := range batchNos {
-		b, _ := medRepo.FindBatchByNumber(ctx, m.ID, bn)
+		b, _ := medRepo.FindBatchByNumber(ctx, testutil.StoreID, m.ID, bn)
 		if b.CurrentStock != 100-workers {
 			t.Errorf("batch %s stock = %d want %d", bn, b.CurrentStock, 100-workers)
 		}
@@ -262,7 +262,7 @@ func TestBonusStockCycle(t *testing.T) {
 		t.Fatalf("bonus checkout: %v", err)
 	}
 	mid := mustMedicineOfBatch(t, batchID)
-	after, _ := medRepo.FindBatchByNumber(ctx, mid, "BONUS-R1")
+	after, _ := medRepo.FindBatchByNumber(ctx, testutil.StoreID, mid, "BONUS-R1")
 	if after.CurrentStock != 88 {
 		t.Fatalf("after sale stock = %d want 88 (100 - 12 physical)", after.CurrentStock)
 	}
@@ -288,7 +288,7 @@ func TestBonusStockCycle(t *testing.T) {
 		t.Errorf("credit restock units = %d want 12", noteItems[0].Quantity+noteItems[0].BonusQuantity)
 	}
 
-	restored, _ := medRepo.FindBatchByNumber(ctx, mid, "BONUS-R1")
+	restored, _ := medRepo.FindBatchByNumber(ctx, testutil.StoreID, mid, "BONUS-R1")
 	if restored.CurrentStock != 100 {
 		t.Errorf("after return stock = %d want 100 (12 units restocked)", restored.CurrentStock)
 	}
@@ -302,7 +302,7 @@ func TestUQCSnapshotImmutable(t *testing.T) {
 
 	m := &models.Medicine{Name: "UQC Snap Med", SaltComposition: "U",
 		Manufacturer: "UQC-Pharma", MinReorderLevel: 5, UQC: "TBS", Packing: "Strip"}
-	if err := medRepo.Create(ctx, m); err != nil {
+	if err := medRepo.Create(ctx, testutil.StoreID, m); err != nil {
 		t.Fatalf("create medicine: %v", err)
 	}
 	in := &repository.PurchaseInput{
@@ -318,7 +318,7 @@ func TestUQCSnapshotImmutable(t *testing.T) {
 	if _, _, err := purchRepo.CreateInward(ctx, in); err != nil {
 		t.Fatalf("inward: %v", err)
 	}
-	batch, err := medRepo.FindBatchByNumber(ctx, m.ID, "UQC-B1")
+	batch, err := medRepo.FindBatchByNumber(ctx, testutil.StoreID, m.ID, "UQC-B1")
 	if err != nil {
 		t.Fatal(err)
 	}

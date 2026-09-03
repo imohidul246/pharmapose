@@ -69,7 +69,7 @@ func TestConcurrentCheckoutInvoiceNumbersUnique(t *testing.T) {
 		t.Errorf("invoice rows = %d want %d", invoices, total)
 	}
 
-	batch, _ := medRepo.FindBatchByNumber(context.Background(), fx.MedicineID, "FIX-B1")
+	batch, _ := medRepo.FindBatchByNumber(context.Background(), testutil.StoreID, fx.MedicineID, "FIX-B1")
 	if batch.CurrentStock != 0 {
 		t.Errorf("stock = %d want 0 (%d sold from %d)", batch.CurrentStock, total, total)
 	}

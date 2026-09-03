@@ -16,7 +16,7 @@ import (
 // ---- Sync endpoints (Phase 2.2) ----
 
 func (d Deps) getInventorySync(c *gin.Context) {
-	snapshot, err := d.MedicineRepo.InventorySnapshot(c.Request.Context())
+	snapshot, err := d.MedicineRepo.InventorySnapshot(c.Request.Context(), storeIDFor(c))
 	if err != nil {
 		mapRepoError(c, err)
 		return
@@ -26,7 +26,7 @@ func (d Deps) getInventorySync(c *gin.Context) {
 }
 
 func (d Deps) getCustomersSync(c *gin.Context) {
-	customers, err := d.CustomerRepo.List(c.Request.Context())
+	customers, err := d.CustomerRepo.List(c.Request.Context(), storeIDFor(c))
 	if err != nil {
 		mapRepoError(c, err)
 		return
@@ -37,7 +37,7 @@ func (d Deps) getCustomersSync(c *gin.Context) {
 // ---- Medicine CRUD ----
 
 func (d Deps) listMedicines(c *gin.Context) {
-	meds, err := d.MedicineRepo.List(c.Request.Context())
+	meds, err := d.MedicineRepo.List(c.Request.Context(), storeIDFor(c))
 	if err != nil {
 		mapRepoError(c, err)
 		return
@@ -46,7 +46,7 @@ func (d Deps) listMedicines(c *gin.Context) {
 }
 
 func (d Deps) getMedicine(c *gin.Context) {
-	m, err := d.MedicineRepo.GetByID(c.Request.Context(), c.Param("id"))
+	m, err := d.MedicineRepo.GetByID(c.Request.Context(), storeIDFor(c), c.Param("id"))
 	if mapRepoError(c, err) {
 		return
 	}
@@ -54,7 +54,7 @@ func (d Deps) getMedicine(c *gin.Context) {
 }
 
 func (d Deps) getMedicineDetail(c *gin.Context) {
-	detail, err := d.MedicineRepo.GetDetail(c.Request.Context(), c.Param("id"))
+	detail, err := d.MedicineRepo.GetDetail(c.Request.Context(), storeIDFor(c), c.Param("id"))
 	if mapRepoError(c, err) {
 		return
 	}
@@ -74,7 +74,7 @@ func (d Deps) createMedicine(c *gin.Context) {
 	if m.MinReorderLevel < 0 {
 		m.MinReorderLevel = 0
 	}
-	if err := d.MedicineRepo.Create(c.Request.Context(), &m); err != nil {
+	if err := d.MedicineRepo.Create(c.Request.Context(), storeIDFor(c), &m); err != nil {
 		mapRepoError(c, err)
 		return
 	}
@@ -88,10 +88,10 @@ func (d Deps) updateMedicine(c *gin.Context) {
 		return
 	}
 	m.ID = c.Param("id")
-	if err := d.MedicineRepo.Update(c.Request.Context(), &m); mapRepoError(c, err) {
+	if err := d.MedicineRepo.Update(c.Request.Context(), storeIDFor(c), &m); mapRepoError(c, err) {
 		return
 	}
-	out, err := d.MedicineRepo.GetByID(c.Request.Context(), m.ID)
+	out, err := d.MedicineRepo.GetByID(c.Request.Context(), storeIDFor(c), m.ID)
 	if mapRepoError(c, err) {
 		return
 	}
@@ -99,7 +99,7 @@ func (d Deps) updateMedicine(c *gin.Context) {
 }
 
 func (d Deps) deleteMedicine(c *gin.Context) {
-	err := d.MedicineRepo.SoftDelete(c.Request.Context(), c.Param("id"))
+	err := d.MedicineRepo.SoftDelete(c.Request.Context(), storeIDFor(c), c.Param("id"))
 	if mapRepoError(c, err) {
 		return
 	}
@@ -117,7 +117,7 @@ func (d Deps) listCustomers(c *gin.Context) {
 	limitQ := strings.TrimSpace(c.Query("limit"))
 
 	if search == "" && customerType == "" && limitQ == "" {
-		customers, err := d.CustomerRepo.List(c.Request.Context())
+		customers, err := d.CustomerRepo.List(c.Request.Context(), storeIDFor(c))
 		if err != nil {
 			mapRepoError(c, err)
 			return
@@ -140,7 +140,7 @@ func (d Deps) listCustomers(c *gin.Context) {
 		return
 	}
 
-	customers, err := d.CustomerRepo.ListFiltered(c.Request.Context(), search, customerType, limit)
+	customers, err := d.CustomerRepo.ListFiltered(c.Request.Context(), storeIDFor(c), search, customerType, limit)
 	if err != nil {
 		mapRepoError(c, err)
 		return
@@ -149,7 +149,7 @@ func (d Deps) listCustomers(c *gin.Context) {
 }
 
 func (d Deps) getCustomer(c *gin.Context) {
-	cust, err := d.CustomerRepo.GetByID(c.Request.Context(), c.Param("id"))
+	cust, err := d.CustomerRepo.GetByID(c.Request.Context(), storeIDFor(c), c.Param("id"))
 	if mapRepoError(c, err) {
 		return
 	}
@@ -166,7 +166,7 @@ func (d Deps) createCustomer(c *gin.Context) {
 		respondBadRequest(c, err)
 		return
 	}
-	if isDuplicateCustomerError(c, d.CustomerRepo.Create(c.Request.Context(), &cust)) {
+	if isDuplicateCustomerError(c, d.CustomerRepo.Create(c.Request.Context(), storeIDFor(c), &cust)) {
 		return
 	}
 	c.JSON(http.StatusCreated, cust)
@@ -183,12 +183,12 @@ func (d Deps) updateCustomer(c *gin.Context) {
 		respondBadRequest(c, err)
 		return
 	}
-	current, err := d.CustomerRepo.GetByID(c.Request.Context(), cust.ID)
+	current, err := d.CustomerRepo.GetByID(c.Request.Context(), storeIDFor(c), cust.ID)
 	if mapRepoError(c, err) {
 		return
 	}
 	cust.CurrentBalance = current.CurrentBalance
-	if isDuplicateCustomerError(c, d.CustomerRepo.Update(c.Request.Context(), &cust)) {
+	if isDuplicateCustomerError(c, d.CustomerRepo.Update(c.Request.Context(), storeIDFor(c), &cust)) {
 		return
 	}
 	c.JSON(http.StatusOK, cust)
@@ -214,11 +214,11 @@ func isDuplicateCustomerError(c *gin.Context, err error) bool {
 // GET /api/customers/:id/ledger — full credit audit trail.
 func (d Deps) customerLedger(c *gin.Context) {
 	id := c.Param("id")
-	customer, err := d.CustomerRepo.GetByID(c.Request.Context(), id)
+	customer, err := d.CustomerRepo.GetByID(c.Request.Context(), storeIDFor(c), id)
 	if mapRepoError(c, err) {
 		return
 	}
-	entries, err := d.CustomerRepo.Ledger(c.Request.Context(), id, 0)
+	entries, err := d.CustomerRepo.Ledger(c.Request.Context(), storeIDFor(c), id, 0)
 	if mapRepoError(c, err) {
 		return
 	}
@@ -233,7 +233,7 @@ func (d Deps) recordPayment(c *gin.Context) {
 		return
 	}
 	customer, entry, err := d.CustomerRepo.RecordPayment(
-		c.Request.Context(), c.Param("id"), in.Amount, in.Notes)
+		c.Request.Context(), storeIDFor(c), c.Param("id"), in.Amount, in.Notes)
 	if mapRepoError(c, err) {
 		return
 	}

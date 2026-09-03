@@ -136,7 +136,7 @@ func seedGSTMedicineInStore(t *testing.T, storeID, name, batchNo string, qty, pu
 	t.Helper()
 	ctx := context.Background()
 
-	storeMedRepo := repository.NewMedicineRepo(pool, storeID)
+	storeMedRepo := repository.NewMedicineRepo(pool)
 	m := &models.Medicine{
 		Name:            name,
 		SaltComposition: "Paracetamol 500mg",
@@ -145,7 +145,7 @@ func seedGSTMedicineInStore(t *testing.T, storeID, name, batchNo string, qty, pu
 		Packing:         "Strip of 10",
 		UQC:             "TAB",
 	}
-	if err := storeMedRepo.Create(ctx, m); err != nil {
+	if err := storeMedRepo.Create(ctx, storeID, m); err != nil {
 		t.Fatalf("create medicine in store %s: %v", storeID, err)
 	}
 
@@ -188,7 +188,7 @@ func seedGSTMedicineInStore(t *testing.T, storeID, name, batchNo string, qty, pu
 	if _, _, err := purchRepo.CreateInward(ctx, in); err != nil {
 		t.Fatalf("seed inward in store %s: %v", storeID, err)
 	}
-	batch, err := storeMedRepo.FindBatchByNumber(ctx, m.ID, batchNo)
+	batch, err := storeMedRepo.FindBatchByNumber(ctx, storeID, m.ID, batchNo)
 	if err != nil {
 		t.Fatalf("find batch: %v", err)
 	}

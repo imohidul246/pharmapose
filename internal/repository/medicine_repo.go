@@ -68,7 +68,7 @@ func LockBatchesForUpdate(ctx context.Context, tx pgx.Tx, storeID string, batchI
 			FROM batches b
 			JOIN medicines m ON m.id = b.medicine_id
 			WHERE b.id = $1 AND b.store_id = $2
-			FOR UPDATE`, id, storeID).Scan(
+			FOR UPDATE OF b`, id, storeID).Scan(
 			&lb.ID, &lb.MedicineID, &lb.MedicineName, &lb.BatchNumber,
 			&lb.SalePrice, &lb.PurchasePrice, &lb.CurrentStock, &lb.UQC)
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -85,16 +85,11 @@ func LockBatchesForUpdate(ctx context.Context, tx pgx.Tx, storeID string, batchI
 }
 
 type MedicineRepo struct {
-	db    *pgxpool.Pool
-	store *storeIDRef
+	db *pgxpool.Pool
 }
 
-func NewMedicineRepo(db *pgxpool.Pool, storeID string) *MedicineRepo {
-	return &MedicineRepo{db: db, store: newStoreIDRef(db, storeID)}
-}
-
-func (r *MedicineRepo) storeID(ctx context.Context) (string, error) {
-	return r.store.get(ctx)
+func NewMedicineRepo(db *pgxpool.Pool) *MedicineRepo {
+	return &MedicineRepo{db: db}
 }
 
 const medicineColumns = `id, name, salt_composition, manufacturer, min_reorder_level, packing, uqc, created_at, updated_at`
@@ -109,40 +104,37 @@ func scanMedicine(row pgx.Row) (*models.Medicine, error) {
 	return &m, nil
 }
 
-func (r *MedicineRepo) Create(ctx context.Context, m *models.Medicine) error {
-	sid, err := r.storeID(ctx)
-	if err != nil {
+func (r *MedicineRepo) Create(ctx context.Context, storeID string, m *models.Medicine) error {
+	if err := requireStoreID(storeID); err != nil {
 		return err
 	}
 	return r.db.QueryRow(ctx, `
 		INSERT INTO medicines (name, salt_composition, manufacturer, min_reorder_level, packing, uqc, store_id)
 		VALUES ($1, $2, $3, $4, $5, $6, $7)
 		RETURNING `+medicineColumns,
-		m.Name, m.SaltComposition, m.Manufacturer, m.MinReorderLevel, m.Packing, m.UQC, sid,
+		m.Name, m.SaltComposition, m.Manufacturer, m.MinReorderLevel, m.Packing, m.UQC, storeID,
 	).Scan(&m.ID, &m.Name, &m.SaltComposition, &m.Manufacturer,
 		&m.MinReorderLevel, &m.Packing, &m.UQC, &m.CreatedAt, &m.UpdatedAt)
 }
 
-func (r *MedicineRepo) GetByID(ctx context.Context, id string) (*models.Medicine, error) {
-	sid, err := r.storeID(ctx)
-	if err != nil {
+func (r *MedicineRepo) GetByID(ctx context.Context, storeID, id string) (*models.Medicine, error) {
+	if err := requireStoreID(storeID); err != nil {
 		return nil, err
 	}
 	m, err := scanMedicine(r.db.QueryRow(ctx,
-		`SELECT `+medicineColumns+` FROM medicines WHERE id = $1 AND store_id = $2 AND deleted_at IS NULL`, id, sid))
+		`SELECT `+medicineColumns+` FROM medicines WHERE id = $1 AND store_id = $2 AND deleted_at IS NULL`, id, storeID))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, models.ErrNotFound
 	}
 	return m, err
 }
 
-func (r *MedicineRepo) List(ctx context.Context) ([]models.Medicine, error) {
-	sid, err := r.storeID(ctx)
-	if err != nil {
+func (r *MedicineRepo) List(ctx context.Context, storeID string) ([]models.Medicine, error) {
+	if err := requireStoreID(storeID); err != nil {
 		return nil, err
 	}
 	rows, err := r.db.Query(ctx,
-		`SELECT `+medicineColumns+` FROM medicines WHERE store_id = $1 AND deleted_at IS NULL ORDER BY name`, sid)
+		`SELECT `+medicineColumns+` FROM medicines WHERE store_id = $1 AND deleted_at IS NULL ORDER BY name`, storeID)
 	if err != nil {
 		return nil, err
 	}
@@ -160,9 +152,8 @@ func (r *MedicineRepo) List(ctx context.Context) ([]models.Medicine, error) {
 	return out, rows.Err()
 }
 
-func (r *MedicineRepo) Update(ctx context.Context, m *models.Medicine) error {
-	sid, err := r.storeID(ctx)
-	if err != nil {
+func (r *MedicineRepo) Update(ctx context.Context, storeID string, m *models.Medicine) error {
+	if err := requireStoreID(storeID); err != nil {
 		return err
 	}
 	tag, err := r.db.Exec(ctx, `
@@ -170,7 +161,7 @@ func (r *MedicineRepo) Update(ctx context.Context, m *models.Medicine) error {
 		SET name = $2, salt_composition = $3, manufacturer = $4,
 		    min_reorder_level = $5, packing = $6, uqc = $7, updated_at = now()
 		WHERE id = $1 AND store_id = $8 AND deleted_at IS NULL`,
-		m.ID, m.Name, m.SaltComposition, m.Manufacturer, m.MinReorderLevel, m.Packing, m.UQC, sid)
+		m.ID, m.Name, m.SaltComposition, m.Manufacturer, m.MinReorderLevel, m.Packing, m.UQC, storeID)
 	if err != nil {
 		return err
 	}
@@ -180,14 +171,13 @@ func (r *MedicineRepo) Update(ctx context.Context, m *models.Medicine) error {
 	return nil
 }
 
-func (r *MedicineRepo) SoftDelete(ctx context.Context, id string) error {
-	sid, err := r.storeID(ctx)
-	if err != nil {
+func (r *MedicineRepo) SoftDelete(ctx context.Context, storeID, id string) error {
+	if err := requireStoreID(storeID); err != nil {
 		return err
 	}
 	tag, err := r.db.Exec(ctx,
 		`UPDATE medicines SET deleted_at = $2, updated_at = now() WHERE id = $1 AND store_id = $3 AND deleted_at IS NULL`,
-		id, time.Now(), sid)
+		id, time.Now(), storeID)
 	if err != nil {
 		return err
 	}
@@ -199,18 +189,17 @@ func (r *MedicineRepo) SoftDelete(ctx context.Context, id string) error {
 
 // FindBatchByNumber resolves the batch row for a medicine's batch number
 // (used after upserts and by tooling that works in batch-number space).
-func (r *MedicineRepo) FindBatchByNumber(ctx context.Context, medicineID, batchNumber string) (*models.Batch, error) {
-	sid, err := r.storeID(ctx)
-	if err != nil {
+func (r *MedicineRepo) FindBatchByNumber(ctx context.Context, storeID, medicineID, batchNumber string) (*models.Batch, error) {
+	if err := requireStoreID(storeID); err != nil {
 		return nil, err
 	}
 	var b models.Batch
 	var expiry time.Time
-	err = r.db.QueryRow(ctx, `
+	err := r.db.QueryRow(ctx, `
 		SELECT id::text, medicine_id::text, batch_number, expiry_date,
 		       purchase_price::float8, sale_price::float8, current_stock, created_at, updated_at
 		FROM batches WHERE medicine_id = $1 AND batch_number = $2 AND store_id = $3`,
-		medicineID, batchNumber, sid,
+		medicineID, batchNumber, storeID,
 	).Scan(&b.ID, &b.MedicineID, &b.BatchNumber, &expiry,
 		&b.PurchasePrice, &b.SalePrice, &b.CurrentStock, &b.CreatedAt, &b.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -225,9 +214,8 @@ func (r *MedicineRepo) FindBatchByNumber(ctx context.Context, medicineID, batchN
 
 // InventorySnapshot returns every live medicine paired with its unexpired batches.
 // This powers the frontend IndexedDB cache; it must stay a single round-trip query.
-func (r *MedicineRepo) InventorySnapshot(ctx context.Context) ([]models.MedicineWithBatches, error) {
-	sid, err := r.storeID(ctx)
-	if err != nil {
+func (r *MedicineRepo) InventorySnapshot(ctx context.Context, storeID string) ([]models.MedicineWithBatches, error) {
+	if err := requireStoreID(storeID); err != nil {
 		return nil, err
 	}
 	rows, err := r.db.Query(ctx, `
@@ -240,7 +228,7 @@ func (r *MedicineRepo) InventorySnapshot(ctx context.Context) ([]models.Medicine
 		LEFT JOIN batches b
 		       ON b.medicine_id = m.id AND b.expiry_date >= CURRENT_DATE AND b.current_stock > 0
 		WHERE m.deleted_at IS NULL AND m.store_id = $1
-		ORDER BY m.name ASC, b.expiry_date ASC`, sid)
+		ORDER BY m.name ASC, b.expiry_date ASC`, storeID)
 	if err != nil {
 		return nil, err
 	}
@@ -301,16 +289,16 @@ func (r *MedicineRepo) InventorySnapshot(ctx context.Context) ([]models.Medicine
 
 // GetDetail returns a full medicine profile with all batches (including expired)
 // and aggregated sales/purchase statistics. This powers the medicine catalog page.
-func (r *MedicineRepo) GetDetail(ctx context.Context, id string) (*models.MedicineDetail, error) {
-	m, err := r.GetByID(ctx, id)
+func (r *MedicineRepo) GetDetail(ctx context.Context, storeID, id string) (*models.MedicineDetail, error) {
+	if err := requireStoreID(storeID); err != nil {
+		return nil, err
+	}
+	m, err := r.GetByID(ctx, storeID, id)
 	if err != nil {
 		return nil, err
 	}
 
-	sid, err := r.storeID(ctx)
-	if err != nil {
-		return nil, err
-	}
+	sid := storeID
 
 	detail := &models.MedicineDetail{Medicine: *m}
 

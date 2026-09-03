@@ -39,17 +39,6 @@ func main() {
 		log.Fatalf("migrations: %v", err)
 	}
 
-	storeID, err := repository.FirstStoreID(ctx, pool)
-	if err != nil {
-		log.Fatalf("resolve store: %v", err)
-	}
-	if envStore := os.Getenv("STORE_ID"); envStore != "" {
-		storeID = envStore
-	}
-	if storeID == "" {
-		log.Printf("no store found yet; the first /api/auth/register will bootstrap the tenant")
-	}
-
 	authRepo := repository.NewAuthRepo(pool)
 	purchaseRequestRepo := repository.NewPurchaseRequestRepo(pool)
 	stockAuditRequestRepo := repository.NewStockAuditRequestRepo(pool)
@@ -66,8 +55,8 @@ func main() {
 		StockAuditRequestRepo: stockAuditRequestRepo,
 		CookieOptions:         cookieOptions,
 		DevOrigins:            devOrigins,
-		MedicineRepo:          repository.NewMedicineRepo(pool, storeID),
-		CustomerRepo:          repository.NewCustomerRepo(pool, storeID),
+		MedicineRepo:          repository.NewMedicineRepo(pool),
+		CustomerRepo:          repository.NewCustomerRepo(pool),
 		SaleRepo:              repository.NewSaleRepo(pool),
 		PurchaseRepo:          repository.NewPurchaseRepo(pool),
 		ReconcileRepo:         repository.NewReconcileRepo(pool),

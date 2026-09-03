@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -254,6 +256,7 @@ func (r *PurchaseRepo) createInwardTx(ctx context.Context, tx pgx.Tx, in *Purcha
 	// very first inward both creates the catalogue entry and stocks it.
 	resolved := make([]lineResult, len(lineResults))
 	copy(resolved, lineResults)
+	createdMeds := make(map[string]string)
 	for i := range resolved {
 		lr := &resolved[i]
 		it := &lr.input
@@ -278,6 +281,24 @@ func (r *PurchaseRepo) createInwardTx(ctx context.Context, tx pgx.Tx, in *Purcha
 			}
 			continue
 		}
+		key := strings.ToLower(strings.TrimSpace(it.MedicineName))
+		if existingID, ok := createdMeds[key]; ok {
+			it.MedicineID = existingID
+			var reuseUQC string
+			if err := tx.QueryRow(ctx, `SELECT COALESCE(uqc,'OTH') FROM medicines WHERE id = $1`, existingID).Scan(&reuseUQC); err == nil && reuseUQC != "" {
+				lr.uqc = reuseUQC
+			} else if lr.uqc == "" {
+				lr.uqc = "OTH"
+			}
+			if err := r.taxLineFromTx(ctx, tx, storeID, invoiceDate, supplyType, lr); err != nil {
+				return nil, nil, err
+			}
+			if lr.taxLine != nil {
+				hasTaxConfig = true
+				lastPriceIncludesTax = lr.priceIncludesTax
+			}
+			continue
+		}
 		var newID string
 		if err := tx.QueryRow(ctx, `
 			INSERT INTO medicines (name, salt_composition, manufacturer, min_reorder_level, packing, store_id)
@@ -288,6 +309,7 @@ func (r *PurchaseRepo) createInwardTx(ctx context.Context, tx pgx.Tx, in *Purcha
 		).Scan(&newID); err != nil {
 			return nil, nil, err
 		}
+		createdMeds[key] = newID
 		it.MedicineID = newID
 		// Snapshot UQC for the newly registered medicine (defaults to NOS).
 		var newUQC string
@@ -354,7 +376,8 @@ func (r *PurchaseRepo) createInwardTx(ctx context.Context, tx pgx.Tx, in *Purcha
 	}
 	chargeableTotal := total
 	if invoiceResult != nil {
-		chargeableTotal, _ = invoiceResult.GrandTotal.Float64()
+		grandTotal, _ := invoiceResult.GrandTotal.Float64()
+		chargeableTotal = math.Max(0, grandTotal-in.DiscountTotal)
 	}
 
 	itcEligible := true
@@ -410,7 +433,7 @@ func (r *PurchaseRepo) createInwardTx(ctx context.Context, tx pgx.Tx, in *Purcha
 		ig, igOK := invoiceResult.IGSTTotal.Float64()
 		ce, ceOK := invoiceResult.CessTotal.Float64()
 		tax, taxOK := invoiceResult.TaxTotal.Float64()
-		gt, gtOK := invoiceResult.GrandTotal.Float64()
+		_, gtOK := invoiceResult.GrandTotal.Float64()
 		if gfOK {
 			po.GrossAmount = &gf
 		}
@@ -433,7 +456,8 @@ func (r *PurchaseRepo) createInwardTx(ctx context.Context, tx pgx.Tx, in *Purcha
 			po.TaxTotal = &tax
 		}
 		if gtOK {
-			po.GrandTotal = &gt
+			ct := chargeableTotal
+			po.GrandTotal = &ct
 		}
 		itc := itcAmount
 		po.ITCAmount = &itc

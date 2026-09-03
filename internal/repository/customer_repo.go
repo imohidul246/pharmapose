@@ -16,16 +16,11 @@ import (
 )
 
 type CustomerRepo struct {
-	db    *pgxpool.Pool
-	store *storeIDRef
+	db *pgxpool.Pool
 }
 
-func NewCustomerRepo(db *pgxpool.Pool, storeID string) *CustomerRepo {
-	return &CustomerRepo{db: db, store: newStoreIDRef(db, storeID)}
-}
-
-func (r *CustomerRepo) storeID(ctx context.Context) (string, error) {
-	return r.store.get(ctx)
+func NewCustomerRepo(db *pgxpool.Pool) *CustomerRepo {
+	return &CustomerRepo{db: db}
 }
 
 const customerColumns = `id, name, phone, credit_limit::float8, current_balance::float8,
@@ -75,9 +70,8 @@ func scanCustomer(row pgx.Row) (*models.Customer, error) {
 	return &c, nil
 }
 
-func (r *CustomerRepo) Create(ctx context.Context, c *models.Customer) error {
-	sid, err := r.storeID(ctx)
-	if err != nil {
+func (r *CustomerRepo) Create(ctx context.Context, storeID string, c *models.Customer) error {
+	if err := requireStoreID(storeID); err != nil {
 		return err
 	}
 	return r.db.QueryRow(ctx, `
@@ -85,33 +79,31 @@ func (r *CustomerRepo) Create(ctx context.Context, c *models.Customer) error {
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		RETURNING `+customerColumns,
 		c.Name, c.Phone, c.CreditLimit, c.GSTIN,
-		c.CustomerType, c.BillingAddress, c.ShippingAddress, c.State, c.StateCode, sid,
+		c.CustomerType, c.BillingAddress, c.ShippingAddress, c.State, c.StateCode, storeID,
 	).Scan(&c.ID, &c.Name, &c.Phone, &c.CreditLimit,
 		&c.CurrentBalance, &c.GSTIN, &c.CustomerType,
 		&c.BillingAddress, &c.ShippingAddress, &c.State, &c.StateCode,
 		&c.CreatedAt, &c.UpdatedAt)
 }
 
-func (r *CustomerRepo) GetByID(ctx context.Context, id string) (*models.Customer, error) {
-	sid, err := r.storeID(ctx)
-	if err != nil {
+func (r *CustomerRepo) GetByID(ctx context.Context, storeID, id string) (*models.Customer, error) {
+	if err := requireStoreID(storeID); err != nil {
 		return nil, err
 	}
 	c, err := scanCustomer(r.db.QueryRow(ctx,
-		`SELECT `+customerColumns+` FROM customers WHERE id = $1 AND store_id = $2`, id, sid))
+		`SELECT `+customerColumns+` FROM customers WHERE id = $1 AND store_id = $2`, id, storeID))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, models.ErrNotFound
 	}
 	return c, err
 }
 
-func (r *CustomerRepo) List(ctx context.Context) ([]models.Customer, error) {
-	sid, err := r.storeID(ctx)
-	if err != nil {
+func (r *CustomerRepo) List(ctx context.Context, storeID string) ([]models.Customer, error) {
+	if err := requireStoreID(storeID); err != nil {
 		return nil, err
 	}
 	rows, err := r.db.Query(ctx,
-		`SELECT `+customerColumns+` FROM customers WHERE store_id = $1 ORDER BY name`, sid)
+		`SELECT `+customerColumns+` FROM customers WHERE store_id = $1 ORDER BY name`, storeID)
 	if err != nil {
 		return nil, err
 	}
@@ -133,18 +125,17 @@ func (r *CustomerRepo) List(ctx context.Context) ([]models.Customer, error) {
 
 // ListFiltered returns a paginated customer subset matching an optional
 // search term (name/phone/GSTIN, case-insensitive) and customer type.
-func (r *CustomerRepo) ListFiltered(ctx context.Context, search, customerType string, limit int) ([]models.Customer, error) {
+func (r *CustomerRepo) ListFiltered(ctx context.Context, storeID, search, customerType string, limit int) ([]models.Customer, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 20
 	}
-	sid, err := r.storeID(ctx)
-	if err != nil {
+	if err := requireStoreID(storeID); err != nil {
 		return nil, err
 	}
 	query := `SELECT ` + customerColumns + ` FROM customers`
 	conds := make([]string, 0, 3)
 	args := make([]interface{}, 0, 4)
-	args = append(args, sid)
+	args = append(args, storeID)
 	conds = append(conds, `store_id = $1`)
 	if search != "" {
 		args = append(args, "%"+search+"%")
@@ -178,9 +169,8 @@ func (r *CustomerRepo) ListFiltered(ctx context.Context, search, customerType st
 	return out, rows.Err()
 }
 
-func (r *CustomerRepo) Update(ctx context.Context, c *models.Customer) error {
-	sid, err := r.storeID(ctx)
-	if err != nil {
+func (r *CustomerRepo) Update(ctx context.Context, storeID string, c *models.Customer) error {
+	if err := requireStoreID(storeID); err != nil {
 		return err
 	}
 	tag, err := r.db.Exec(ctx, `
@@ -190,7 +180,7 @@ func (r *CustomerRepo) Update(ctx context.Context, c *models.Customer) error {
 		    state = $9, state_code = $10, updated_at = now()
 		WHERE id = $1 AND store_id = $11`,
 		c.ID, c.Name, c.Phone, c.CreditLimit,
-		c.GSTIN, c.CustomerType, c.BillingAddress, c.ShippingAddress, c.State, c.StateCode, sid)
+		c.GSTIN, c.CustomerType, c.BillingAddress, c.ShippingAddress, c.State, c.StateCode, storeID)
 	if err != nil {
 		return err
 	}
@@ -204,20 +194,20 @@ func (r *CustomerRepo) Update(ctx context.Context, c *models.Customer) error {
 // outstanding balance. Overpayments are rejected so the ledger always
 // reconciles with real credit. The balance mutation and its audit entry commit
 // atomically, and the row lock serializes concurrent payments per customer.
-func (r *CustomerRepo) RecordPayment(ctx context.Context, customerID string, amount float64, notes string) (*models.Customer, *models.CustomerLedgerEntry, error) {
+func (r *CustomerRepo) RecordPayment(ctx context.Context, storeID, customerID string, amount float64, notes string) (*models.Customer, *models.CustomerLedgerEntry, error) {
 	if amount <= 0 {
 		return nil, nil, models.NewValidationError("payment amount must be positive")
+	}
+	if err := requireStoreID(storeID); err != nil {
+		return nil, nil, err
 	}
 
 	var (
 		cust  *models.Customer
 		entry *models.CustomerLedgerEntry
 	)
-	sid, err := r.storeID(ctx)
-	if err != nil {
-		return nil, nil, err
-	}
-	err = pgx.BeginFunc(ctx, r.db, func(tx pgx.Tx) error {
+	sid := storeID
+	err := pgx.BeginFunc(ctx, r.db, func(tx pgx.Tx) error {
 		var outstanding float64
 		err := tx.QueryRow(ctx,
 			`SELECT current_balance::float8 FROM customers WHERE id = $1 AND store_id = $2 FOR UPDATE`,
@@ -269,14 +259,14 @@ func (r *CustomerRepo) RecordPayment(ctx context.Context, customerID string, amo
 }
 
 // Ledger returns the customer's balance history, newest first.
-func (r *CustomerRepo) Ledger(ctx context.Context, customerID string, limit int) ([]models.CustomerLedgerEntry, error) {
+func (r *CustomerRepo) Ledger(ctx context.Context, storeID, customerID string, limit int) ([]models.CustomerLedgerEntry, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 200
 	}
-	sid, err := r.storeID(ctx)
-	if err != nil {
+	if err := requireStoreID(storeID); err != nil {
 		return nil, err
 	}
+	sid := storeID
 	rows, err := r.db.Query(ctx, `
 		SELECT cl.id::text, cl.customer_id::text, cl.entry_type, cl.amount::float8, cl.balance_after::float8, cl.notes, cl.created_at
 		FROM customer_ledger cl

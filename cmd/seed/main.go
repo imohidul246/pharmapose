@@ -99,9 +99,9 @@ resetDatabase(ctx, pool)
 	}
 
 	supplierRepo := repository.NewSupplierRepo(pool)
-	medRepo := repository.NewMedicineRepo(pool, storeID)
+	medRepo := repository.NewMedicineRepo(pool)
 	purchaseRepo := repository.NewPurchaseRepo(pool)
-	customerRepo := repository.NewCustomerRepo(pool, storeID)
+	customerRepo := repository.NewCustomerRepo(pool)
 	saleRepo := repository.NewSaleRepo(pool)
 	taxRepo := repository.NewTaxRepo(pool)
 
@@ -179,7 +179,7 @@ resetDatabase(ctx, pool)
 		m := &models.Medicine{Name: sm.Name, SaltComposition: sm.Salt,
 			Manufacturer: sm.Manufacturer, MinReorderLevel: sm.MinReorder,
 			UQC: sm.UQC, Packing: "Strip"}
-		if err := medRepo.Create(ctx, m); err != nil {
+		if err := medRepo.Create(ctx, storeID, m); err != nil {
 			log.Fatalf("create medicine %s: %v", sm.Name, err)
 		}
 		if err := assignTaxConfig(ctx, taxRepo, storeID, m.ID, sm); err != nil {
@@ -213,7 +213,7 @@ resetDatabase(ctx, pool)
 			log.Fatalf("inward for %s: %v", m.Name, err)
 		}
 		for _, sb := range sm.Batches {
-			b, err := medRepo.FindBatchByNumber(ctx, m.ID, sb.Number)
+			b, err := medRepo.FindBatchByNumber(ctx, storeID, m.ID, sb.Number)
 			if err != nil {
 				log.Fatalf("find batch %s/%s: %v", sm.Name, sb.Number, err)
 			}
@@ -238,7 +238,7 @@ resetDatabase(ctx, pool)
 	var retailCustomerIDs []string
 	var b2bCustomers []models.Customer
 	for i := range customers {
-		if err := customerRepo.Create(ctx, &customers[i]); err != nil {
+		if err := customerRepo.Create(ctx, storeID, &customers[i]); err != nil {
 			log.Fatalf("create customer %s: %v", customers[i].Name, err)
 		}
 		if customers[i].CustomerType == "B2B" {

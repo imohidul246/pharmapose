@@ -31,10 +31,10 @@ func seedStoreB(t *testing.T, storeB string) (medicineID, batchID, customerID st
 	t.Helper()
 	ctx := context.Background()
 
-	medB := repository.NewMedicineRepo(pool, storeB)
+	medB := repository.NewMedicineRepo(pool)
 	m := &models.Medicine{Name: "Store B Only Med", SaltComposition: "B-Salt",
 		Manufacturer: "B-Pharma", MinReorderLevel: 5}
-	if err := medB.Create(ctx, m); err != nil {
+	if err := medB.Create(ctx, storeB, m); err != nil {
 		t.Fatalf("create store-B medicine: %v", err)
 	}
 
@@ -54,15 +54,15 @@ func seedStoreB(t *testing.T, storeB string) (medicineID, batchID, customerID st
 	if _, _, err := purchRepo.CreateInward(ctx, in); err != nil {
 		t.Fatalf("store-B inward: %v", err)
 	}
-	batch, err := medB.FindBatchByNumber(ctx, m.ID, "B-B1")
+	batch, err := medB.FindBatchByNumber(ctx, storeB, m.ID, "B-B1")
 	if err != nil {
 		t.Fatalf("find store-B batch: %v", err)
 	}
 
-	custB := repository.NewCustomerRepo(pool, storeB)
+	custB := repository.NewCustomerRepo(pool)
 	c := &models.Customer{Name: "Store B Customer", Phone: "+918888800001",
 		CreditLimit: 5000, CustomerType: "B2C"}
-	if err := custB.Create(ctx, c); err != nil {
+	if err := custB.Create(ctx, storeB, c); err != nil {
 		t.Fatalf("create store-B customer: %v", err)
 	}
 	return m.ID, batch.ID, c.ID
@@ -91,8 +91,8 @@ func TestCrossStoreBatchCheckoutRejected(t *testing.T) {
 	}
 
 	// Store B's stock is untouched.
-	medB := repository.NewMedicineRepo(pool, storeB)
-	batch, err := medB.FindBatchByNumber(context.Background(), mustMedicineOfBatch(t, batchB), "B-B1")
+	medB := repository.NewMedicineRepo(pool)
+	batch, err := medB.FindBatchByNumber(context.Background(), storeB, mustMedicineOfBatch(t, batchB), "B-B1")
 	if err != nil {
 		t.Fatalf("re-read store-B batch: %v", err)
 	}
@@ -132,10 +132,10 @@ func TestCrossStoreCustomerNotVisible(t *testing.T) {
 
 	ctx := context.Background()
 
-	if _, err := custRepo.GetByID(ctx, customerB); err != models.ErrNotFound {
+	if _, err := custRepo.GetByID(ctx, testutil.StoreID, customerB); err != models.ErrNotFound {
 		t.Errorf("GetByID foreign customer = %v want ErrNotFound", err)
 	}
-	if _, _, err := custRepo.RecordPayment(ctx, customerB, 10, "probe"); err != models.ErrNotFound {
+	if _, _, err := custRepo.RecordPayment(ctx, testutil.StoreID, customerB, 10, "probe"); err != models.ErrNotFound {
 		t.Errorf("RecordPayment foreign customer = %v want ErrNotFound", err)
 	}
 
@@ -153,8 +153,8 @@ func TestCrossStoreCustomerNotVisible(t *testing.T) {
 	}
 
 	// Store B's customer balance is untouched.
-	custB := repository.NewCustomerRepo(pool, storeB)
-	c, err := custB.GetByID(ctx, customerB)
+	custB := repository.NewCustomerRepo(pool)
+	c, err := custB.GetByID(ctx, storeB, customerB)
 	if err != nil {
 		t.Fatalf("re-read store-B customer: %v", err)
 	}
@@ -170,14 +170,14 @@ func TestCrossStoreMedicineNotVisible(t *testing.T) {
 	storeB := secondStore(t)
 	medB, _, _ := seedStoreB(t, storeB)
 
-	if _, err := medRepo.GetByID(context.Background(), medB); err != models.ErrNotFound {
+	if _, err := medRepo.GetByID(context.Background(), testutil.StoreID, medB); err != models.ErrNotFound {
 		t.Errorf("GetByID foreign medicine = %v want ErrNotFound", err)
 	}
 	ghost := &models.Medicine{ID: medB, Name: "Hijacked"}
-	if err := medRepo.Update(context.Background(), ghost); err != models.ErrNotFound {
+	if err := medRepo.Update(context.Background(), testutil.StoreID, ghost); err != models.ErrNotFound {
 		t.Errorf("Update foreign medicine = %v want ErrNotFound", err)
 	}
-	if err := medRepo.SoftDelete(context.Background(), medB); err != models.ErrNotFound {
+	if err := medRepo.SoftDelete(context.Background(), testutil.StoreID, medB); err != models.ErrNotFound {
 		t.Errorf("SoftDelete foreign medicine = %v want ErrNotFound", err)
 	}
 }

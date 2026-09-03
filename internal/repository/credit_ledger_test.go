@@ -31,7 +31,7 @@ func TestCreditSaleWritesLedgerEntry(t *testing.T) {
 		t.Fatalf("credit sale: %v", err)
 	}
 
-	entries, err := custRepo.Ledger(ctx, fx.CustomerID, 0)
+	entries, err := custRepo.Ledger(ctx, testutil.StoreID, fx.CustomerID, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,7 +46,7 @@ func TestCreditSaleWritesLedgerEntry(t *testing.T) {
 		t.Errorf("notes should reference invoice: %q", e.Notes)
 	}
 
-	cust, _ := custRepo.GetByID(ctx, fx.CustomerID)
+	cust, _ := custRepo.GetByID(ctx, testutil.StoreID, fx.CustomerID)
 	if cust.CurrentBalance != res.Invoice.TotalAmount {
 		t.Errorf("balance %.2f != invoice total %.2f", cust.CurrentBalance, res.Invoice.TotalAmount)
 	}
@@ -64,7 +64,7 @@ func TestCashSaleWritesNoLedgerEntry(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	entries, _ := custRepo.Ledger(context.Background(), fx.CustomerID, 0)
+	entries, _ := custRepo.Ledger(context.Background(), testutil.StoreID, fx.CustomerID, 0)
 	if len(entries) != 0 {
 		t.Errorf("cash sale must not touch ledger, got %d entries", len(entries))
 	}
@@ -87,28 +87,28 @@ func TestPaymentFlowFullAndPartial(t *testing.T) {
 		}
 	}
 
-	cust, _ := custRepo.GetByID(ctx, cid)
+	cust, _ := custRepo.GetByID(ctx, testutil.StoreID, cid)
 	if cust.CurrentBalance != 60 {
 		t.Fatalf("balance = %.2f want 60.00", cust.CurrentBalance)
 	}
 
-	if _, _, err := custRepo.RecordPayment(ctx, cid, 25, "part payment cash"); err != nil {
+	if _, _, err := custRepo.RecordPayment(ctx, testutil.StoreID, cid, 25, "part payment cash"); err != nil {
 		t.Fatalf("partial payment: %v", err)
 	}
-	cust, _ = custRepo.GetByID(ctx, cid)
+	cust, _ = custRepo.GetByID(ctx, testutil.StoreID, cid)
 	if cust.CurrentBalance != 35 {
 		t.Errorf("balance after part payment = %.2f want 35.00", cust.CurrentBalance)
 	}
 
-	if _, _, err := custRepo.RecordPayment(ctx, cid, 35, "settled in full"); err != nil {
+	if _, _, err := custRepo.RecordPayment(ctx, testutil.StoreID, cid, 35, "settled in full"); err != nil {
 		t.Fatalf("full payment: %v", err)
 	}
-	cust, _ = custRepo.GetByID(ctx, cid)
+	cust, _ = custRepo.GetByID(ctx, testutil.StoreID, cid)
 	if cust.CurrentBalance != 0 {
 		t.Errorf("balance after full settlement = %.2f want 0.00", cust.CurrentBalance)
 	}
 
-	entries, err := custRepo.Ledger(ctx, cid, 0)
+	entries, err := custRepo.Ledger(ctx, testutil.StoreID, cid, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -138,18 +138,18 @@ func TestOverpaymentRejectedAtomically(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	before, _ := custRepo.GetByID(ctx, cid)
-	_, _, err := custRepo.RecordPayment(ctx, cid, before.CurrentBalance+1, "overpay attempt")
+	before, _ := custRepo.GetByID(ctx, testutil.StoreID, cid)
+	_, _, err := custRepo.RecordPayment(ctx, testutil.StoreID, cid, before.CurrentBalance+1, "overpay attempt")
 	if err == nil || !strings.Contains(err.Error(), "exceeds outstanding") {
 		t.Fatalf("want exceeds-outstanding error, got %v", err)
 	}
 
-	after, _ := custRepo.GetByID(ctx, cid)
+	after, _ := custRepo.GetByID(ctx, testutil.StoreID, cid)
 	if after.CurrentBalance != before.CurrentBalance {
 		t.Errorf("rejected overpayment mutated balance: %.2f → %.2f",
 			before.CurrentBalance, after.CurrentBalance)
 	}
-	entries, _ := custRepo.Ledger(ctx, cid, 0)
+	entries, _ := custRepo.Ledger(ctx, testutil.StoreID, cid, 0)
 	if len(entries) != 1 {
 		t.Errorf("rejected overpayment wrote ledger rows: %d", len(entries))
 	}
@@ -160,13 +160,13 @@ func TestInvalidPaymentsRejected(t *testing.T) {
 	fx := creditFixture(t)
 
 	for _, amount := range []float64{0, -10} {
-		_, _, err := custRepo.RecordPayment(context.Background(), fx.CustomerID, amount, "")
+		_, _, err := custRepo.RecordPayment(context.Background(), testutil.StoreID, fx.CustomerID, amount, "")
 		if err == nil {
 			t.Errorf("amount %.2f must be rejected", amount)
 		}
 	}
 
-	_, _, err := custRepo.RecordPayment(context.Background(),
+	_, _, err := custRepo.RecordPayment(context.Background(), testutil.StoreID,
 		"00000000-0000-0000-0000-000000000000", 5, "")
 	if !errors.Is(err, models.ErrNotFound) {
 		t.Fatalf("unknown customer should be ErrNotFound, got %v", err)

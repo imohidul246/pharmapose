@@ -171,7 +171,7 @@ export const api = {
 
   createStockAuditRequest(
     notes: string,
-    items: { batch_id: string; physical_count: number; reason: string }[],
+    items: { medicine_id: string; batch_id: string; physical_quantity: number; reason: string }[],
   ): Promise<{ request: StockAuditRequest; items: StockAuditRequestItem[] }> {
     return request('/api/stock-audit-requests', {
       method: 'POST',

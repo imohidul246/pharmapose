@@ -224,7 +224,7 @@ func mustSeedMedicine(t *testing.T) string {
 		Name:         fmt.Sprintf("2B Med %d", time.Now().UnixNano()),
 		Manufacturer: "2B Pharma",
 	}
-	if err := medRepo.Create(context.Background(), m); err != nil {
+	if err := medRepo.Create(context.Background(), testutil.StoreID, m); err != nil {
 		t.Fatalf("create medicine: %v", err)
 	}
 	return m.ID

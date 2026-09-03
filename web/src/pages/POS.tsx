@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../lib/api'
-import { loadCachedCustomers, loadCachedMedicines, upsertCachedCustomer, getCachedMedicineTax } from '../lib/db'
+import { loadCachedCustomers, loadCachedMedicines, upsertCachedCustomer, getCachedMedicineTax, syncLocalCache } from '../lib/db'
 import { daysUntil, expiryClass, money } from '../lib/format'
 import { searchMedicines, type SearchHit } from '../lib/search'
 import CustomerForm from '../components/CustomerForm'
@@ -32,19 +32,23 @@ interface CartLine {
   bonusQuantity: number
 }
 
+function roundMoney(n: number): number {
+  return Math.round((n + Number.EPSILON) * 100) / 100
+}
+
 function lineSellPrice(l: CartLine): number {
   return l.sellPrice ?? l.unitPrice
 }
 
 function lineGross(l: CartLine): number {
-  return lineSellPrice(l) * l.quantity
+  return roundMoney(lineSellPrice(l) * l.quantity)
 }
 
 function lineDiscountAmount(l: CartLine): number {
   if (l.discountValue <= 0) return 0
   const gross = lineGross(l)
   const raw = l.discountType === 'percent' ? (gross * l.discountValue) / 100 : l.discountValue
-  return Math.min(Math.max(raw, 0), gross)
+  return roundMoney(Math.min(Math.max(raw, 0), gross))
 }
 
 type SaleType = 'RETAIL' | 'B2B'
@@ -176,8 +180,8 @@ export default function POS({ cacheVersion }: { cacheVersion: number }) {
   const patchB2B = (batchId: string, patch: Partial<Pick<CartLine, 'sellPrice' | 'bonusQuantity'>>) =>
     setCart((prev) => prev.map((l) => (l.batchId === batchId ? { ...l, ...patch } : l)))
 
-  const total = cart.reduce((acc, l) => acc + lineGross(l) - lineDiscountAmount(l), 0)
-  const totalDiscount = cart.reduce((acc, l) => acc + lineDiscountAmount(l), 0)
+  const total = roundMoney(cart.reduce((acc, l) => acc + roundMoney(lineGross(l) - lineDiscountAmount(l)), 0))
+  const totalDiscount = roundMoney(cart.reduce((acc, l) => acc + lineDiscountAmount(l), 0))
 
   // The customer attached to this sale: B2B uses its own selector (available
   // for both cash and credit), otherwise credit requires a customer.
@@ -246,6 +250,7 @@ export default function POS({ cacheVersion }: { cacheVersion: number }) {
               : undefined,
         })),
       })
+      void syncLocalCache().catch(() => {})
       setReceipt(res)
       setCart([])
       setPaymentType('CASH')
@@ -348,7 +353,7 @@ export default function POS({ cacheVersion }: { cacheVersion: number }) {
                       a.href = url
                       a.download = `B2B_${receipt.invoice.invoice_no}.pdf`
                       a.click()
-                      URL.revokeObjectURL(url)
+                      setTimeout(() => URL.revokeObjectURL(url), 10_000)
                     } catch (err) {
                       setError(err instanceof Error ? err.message : String(err))
                     }
@@ -578,7 +583,7 @@ export default function POS({ cacheVersion }: { cacheVersion: number }) {
             {cart.map((l) => {
               const gross = lineGross(l)
               const disc = lineDiscountAmount(l)
-              const net = gross - disc
+              const net = roundMoney(gross - disc)
               const lineTax = taxByLine[l.batchId]
               const gstPct = lineTax?.tax_rate?.gst_rate ?? null
               return (

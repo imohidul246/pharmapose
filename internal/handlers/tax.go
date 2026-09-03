@@ -71,7 +71,7 @@ func (d Deps) upsertTaxRate(c *gin.Context) {
 // PUT /api/medicines/:id/tax-config — assign tax config to a medicine.
 // Requires the medicine to belong to the current store.
 func (d Deps) upsertMedicineTaxConfig(c *gin.Context) {
-	if _, err := d.MedicineRepo.GetByID(c.Request.Context(), c.Param("id")); err != nil {
+	if _, err := d.MedicineRepo.GetByID(c.Request.Context(), storeIDFor(c), c.Param("id")); err != nil {
 		mapRepoError(c, err)
 		return
 	}

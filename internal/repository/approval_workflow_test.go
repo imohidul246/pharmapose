@@ -84,7 +84,7 @@ func TestPurchaseRequestWorkflow(t *testing.T) {
 	}
 
 	// The batch created by the approval carries the right quantity.
-	batch, err := medRepo.FindBatchByNumber(ctx, medID, "RQ-B1")
+	batch, err := medRepo.FindBatchByNumber(ctx, testutil.StoreID, medID, "RQ-B1")
 	if err != nil || batch.CurrentStock != 50 {
 		t.Errorf("batch = %+v err=%v, want 50 units", batch, err)
 	}
@@ -108,7 +108,7 @@ func seedOneMedicine(t *testing.T, name string) string {
 	t.Helper()
 	ctx := context.Background()
 	m := &models.Medicine{Name: name, SaltComposition: "Paracetamol", Manufacturer: "VM"}
-	if err := medRepo.Create(ctx, m); err != nil {
+	if err := medRepo.Create(ctx, testutil.StoreID, m); err != nil {
 		t.Fatalf("create medicine: %v", err)
 	}
 	return m.ID
@@ -209,7 +209,7 @@ func TestStockAuditRequestWorkflow(t *testing.T) {
 	}
 
 	// Live stock now reflects the counted quantity.
-	batch, err := medRepo.FindBatchByNumber(ctx, fx.MedicineID, "FIX-B1")
+	batch, err := medRepo.FindBatchByNumber(ctx, testutil.StoreID, fx.MedicineID, "FIX-B1")
 	if err != nil {
 		t.Fatalf("find batch: %v", err)
 	}

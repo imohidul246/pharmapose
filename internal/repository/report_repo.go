@@ -45,7 +45,7 @@ func (r *ReportRepo) Sales(ctx context.Context, storeID string, start, end time.
 	rows, err := r.db.Query(ctx, `
 		SELECT si.payment_type::text,
 		       COUNT(DISTINCT si.id)::int,
-		       COALESCE(SUM(si.total_amount), 0)::float8,
+		       COALESCE(SUM(COALESCE(si.grand_total, si.total_amount)), 0)::float8,
 		       COALESCE((SELECT SUM(sii.quantity)
 		                 FROM sales_invoice_items sii
 		                 JOIN sales_invoices s2 ON s2.id = sii.invoice_id
@@ -77,7 +77,7 @@ func (r *ReportRepo) Sales(ctx context.Context, storeID string, start, end time.
 		SELECT (si.created_at AT TIME ZONE 'UTC')::date::text,
 		       si.payment_type::text,
 		       COUNT(*)::int,
-		       COALESCE(SUM(si.total_amount), 0)::float8
+		       COALESCE(SUM(COALESCE(si.grand_total, si.total_amount)), 0)::float8
 		FROM sales_invoices si
 		WHERE si.created_at >= $1 AND si.created_at < $2 AND si.store_id = $3
 		GROUP BY 1, 2

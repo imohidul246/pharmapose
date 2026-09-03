@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { api } from '../lib/api'
 import { money } from '../lib/format'
 import Pagination, { usePaged } from '../components/Pagination'
@@ -33,6 +33,9 @@ export default function Customers({ onMutated }: { onMutated: () => Promise<void
 
   const b2cPage = usePaged(b2cList, 10)
   const b2bPage = usePaged(b2bList, 10)
+
+  const handleB2cResults = useCallback((r: Customer[] | null) => setB2cFilter(r), [])
+  const handleB2bResults = useCallback((r: Customer[] | null) => setB2bFilter(r), [])
 
   const load = async () => {
     try {
@@ -85,7 +88,7 @@ export default function Customers({ onMutated }: { onMutated: () => Promise<void
       page: b2cPage,
       list: b2cFull,
       filtered: b2cFilter !== null,
-      onResults: (r: Customer[] | null) => setB2cFilter(r),
+      onResults: handleB2cResults,
       customerType: 'B2C' as const,
       style: variants.udhaar,
       emptyHint: b2cFilter === null
@@ -97,7 +100,7 @@ export default function Customers({ onMutated }: { onMutated: () => Promise<void
       page: b2bPage,
       list: b2bFull,
       filtered: b2bFilter !== null,
-      onResults: (r: Customer[] | null) => setB2bFilter(r),
+      onResults: handleB2bResults,
       customerType: 'B2B' as const,
       style: variants.amber,
       emptyHint: b2bFilter === null

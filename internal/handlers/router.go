@@ -43,7 +43,7 @@ func NewRouter(d Deps) *gin.Engine {
 	r.Use(cors.New(cors.Config{
 		AllowOrigins:     d.DevOrigins,
 		AllowMethods:     []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
-		AllowHeaders:     []string{"Origin", "Content-Type", "Accept"},
+		AllowHeaders:     []string{"Origin", "Content-Type", "Accept", "X-Store-ID", "Authorization"},
 		AllowCredentials: true,
 	}))
 	r.Use(gzip.Gzip(gzip.DefaultCompression))

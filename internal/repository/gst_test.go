@@ -23,7 +23,7 @@ func seedGSTMedicine(t *testing.T) (medicineID string, batchID string) {
 		MinReorderLevel:  10,
 		Packing:          "Strip of 10",
 	}
-	if err := medRepo.Create(ctx, m); err != nil {
+	if err := medRepo.Create(ctx, testutil.StoreID, m); err != nil {
 		t.Fatalf("create medicine: %v", err)
 	}
 	medicineID = m.ID
@@ -96,7 +96,7 @@ func seedGSTMedicine(t *testing.T) (medicineID string, batchID string) {
 		t.Fatalf("expected 1 item, got %d", len(items))
 	}
 
-	batch, err := medRepo.FindBatchByNumber(ctx, medicineID, "GST-B1")
+	batch, err := medRepo.FindBatchByNumber(ctx, testutil.StoreID, medicineID, "GST-B1")
 	if err != nil {
 		t.Fatalf("find batch: %v", err)
 	}
@@ -191,7 +191,7 @@ func TestCheckoutWithGSTIntraState(t *testing.T) {
 	}
 
 	// Verify batch stock decremented
-	batch, _ := medRepo.FindBatchByNumber(ctx, medicineID, "GST-B1")
+	batch, _ := medRepo.FindBatchByNumber(ctx, testutil.StoreID, medicineID, "GST-B1")
 	if batch.CurrentStock != 90 {
 		t.Errorf("stock = %d want 90", batch.CurrentStock)
 	}
@@ -316,7 +316,7 @@ func TestLegacyInvoiceBackwardCompatibility(t *testing.T) {
 		t.Errorf("items mismatch: %+v", res.Items)
 	}
 
-	batch, _ := medRepo.FindBatchByNumber(context.Background(), fx.MedicineID, "FIX-B1")
+	batch, _ := medRepo.FindBatchByNumber(context.Background(), testutil.StoreID, fx.MedicineID, "FIX-B1")
 	if batch.CurrentStock != 98 {
 		t.Errorf("stock = %d want 98", batch.CurrentStock)
 	}
@@ -336,7 +336,7 @@ func TestBonusQuantityInventoryCostCorrect(t *testing.T) {
 		Name: "Blended Cost Med", SaltComposition: "Test",
 		Manufacturer: "TestPharma", MinReorderLevel: 5,
 	}
-	if err := medRepo.Create(ctx, m); err != nil {
+	if err := medRepo.Create(ctx, testutil.StoreID, m); err != nil {
 		t.Fatalf("create medicine: %v", err)
 	}
 
@@ -358,7 +358,7 @@ func TestBonusQuantityInventoryCostCorrect(t *testing.T) {
 		t.Fatalf("inward: %v", err)
 	}
 
-	batch, err := medRepo.FindBatchByNumber(ctx, m.ID, "BLEND-B1")
+	batch, err := medRepo.FindBatchByNumber(ctx, testutil.StoreID, m.ID, "BLEND-B1")
 	if err != nil {
 		t.Fatalf("find batch: %v", err)
 	}
@@ -407,7 +407,7 @@ func TestBonusQuantityGSTInteraction(t *testing.T) {
 	}
 
 	// Stock = 12
-	batch, _ := medRepo.FindBatchByNumber(ctx, medicineID, "GSTB-B1")
+	batch, _ := medRepo.FindBatchByNumber(ctx, testutil.StoreID, medicineID, "GSTB-B1")
 	if batch.CurrentStock != 12 {
 		t.Errorf("stock = %d want 12", batch.CurrentStock)
 	}
@@ -416,7 +416,7 @@ func TestBonusQuantityGSTInteraction(t *testing.T) {
 	c := &models.Customer{Name: "GST Bonus Customer",
 		Phone: fmt.Sprintf("+9198%07d", time.Now().UnixNano()%10000000),
 		CustomerType: "B2C"}
-	if err := custRepo.Create(ctx, c); err != nil {
+	if err := custRepo.Create(ctx, testutil.StoreID, c); err != nil {
 		t.Fatalf("create customer: %v", err)
 	}
 
@@ -441,7 +441,7 @@ func TestBonusQuantityGSTInteraction(t *testing.T) {
 	}
 
 	// Stock should be 0
-	batch2, _ := medRepo.FindBatchByNumber(ctx, medicineID, "GSTB-B1")
+	batch2, _ := medRepo.FindBatchByNumber(ctx, testutil.StoreID, medicineID, "GSTB-B1")
 	if batch2.CurrentStock != 0 {
 		t.Errorf("final stock = %d want 0", batch2.CurrentStock)
 	}
@@ -457,7 +457,7 @@ func TestBonusStockSoldCompletely(t *testing.T) {
 		Name: "Full Sell Med", SaltComposition: "Test",
 		Manufacturer: "TestPharma", MinReorderLevel: 0,
 	}
-	if err := medRepo.Create(ctx, m); err != nil {
+	if err := medRepo.Create(ctx, testutil.StoreID, m); err != nil {
 		t.Fatalf("create medicine: %v", err)
 	}
 
@@ -482,11 +482,11 @@ func TestBonusStockSoldCompletely(t *testing.T) {
 	c := &models.Customer{Name: "Full Sell Customer",
 		Phone: fmt.Sprintf("+9198%07d", time.Now().UnixNano()%10000000),
 		CustomerType: "B2C"}
-	if err := custRepo.Create(ctx, c); err != nil {
+	if err := custRepo.Create(ctx, testutil.StoreID, c); err != nil {
 		t.Fatalf("create customer: %v", err)
 	}
 
-	batch, _ := medRepo.FindBatchByNumber(ctx, m.ID, "FULL-B1")
+	batch, _ := medRepo.FindBatchByNumber(ctx, testutil.StoreID, m.ID, "FULL-B1")
 
 checkout := &repository.CheckoutInput{
 		StoreID:     sid(testutil.StoreID),
@@ -501,7 +501,7 @@ checkout := &repository.CheckoutInput{
 		t.Fatalf("checkout: %v", err)
 	}
 
-	batch2, _ := medRepo.FindBatchByNumber(ctx, m.ID, "FULL-B1")
+	batch2, _ := medRepo.FindBatchByNumber(ctx, testutil.StoreID, m.ID, "FULL-B1")
 	if batch2.CurrentStock != 0 {
 		t.Errorf("final stock = %d want 0", batch2.CurrentStock)
 	}
@@ -517,7 +517,7 @@ func TestPurchaseStatsTotalSpendExcludesBonus(t *testing.T) {
 		Name: "Stats Med", SaltComposition: "Test",
 		Manufacturer: "TestPharma", MinReorderLevel: 0,
 	}
-	if err := medRepo.Create(ctx, m); err != nil {
+	if err := medRepo.Create(ctx, testutil.StoreID, m); err != nil {
 		t.Fatalf("create medicine: %v", err)
 	}
 
@@ -542,7 +542,7 @@ func TestPurchaseStatsTotalSpendExcludesBonus(t *testing.T) {
 		t.Fatalf("inward: %v", err)
 	}
 
-	detail, err := medRepo.GetDetail(ctx, m.ID)
+	detail, err := medRepo.GetDetail(ctx, testutil.StoreID, m.ID)
 	if err != nil {
 		t.Fatalf("get detail: %v", err)
 	}
@@ -647,7 +647,7 @@ func TestInvoiceTaxPersistedAfterRateChange(t *testing.T) {
 		MinReorderLevel:  2,
 		Packing:          "Tablet",
 	}
-	if err := medRepo.Create(ctx, m); err != nil {
+	if err := medRepo.Create(ctx, testutil.StoreID, m); err != nil {
 		t.Fatalf("create medicine: %v", err)
 	}
 	if _, err := tr.UpsertMedicineTaxConfig(ctx, testutil.StoreID, m.ID, hsn.ID, rate12.ID, false); err != nil {
@@ -669,7 +669,7 @@ func TestInvoiceTaxPersistedAfterRateChange(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("seed inward: %v", err)
 	}
-	batch, err := medRepo.FindBatchByNumber(ctx, m.ID, "REG-B1")
+	batch, err := medRepo.FindBatchByNumber(ctx, testutil.StoreID, m.ID, "REG-B1")
 	if err != nil {
 		t.Fatalf("find batch: %v", err)
 	}
