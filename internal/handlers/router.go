@@ -16,6 +16,7 @@ import (
 
 type Deps struct {
 	AuthRepo                    *repository.AuthRepo
+	PlatformRepo                *repository.PlatformRepo
 	PurchaseRequestRepo         *repository.PurchaseRequestRepo
 	StockAuditRequestRepo       *repository.StockAuditRequestRepo
 	CookieOptions               auth.CookieOptions
@@ -65,6 +66,19 @@ func NewRouter(d Deps) *gin.Engine {
 			protected.POST("/auth/logout", d.logout)
 			protected.GET("/auth/me", d.me)
 			protected.POST("/auth/change-password", d.changePassword)
+
+			// Global platform administration: super-admin only. Deliberately
+			// outside any tenant scope — the handlers list/renew/suspend any
+			// store. RequireAuth binds the principal; RequirePlatformAdmin
+			// rejects every non-admin (including store owners).
+			platform := protected.Group("/platform")
+			platform.Use(auth.RequirePlatformAdmin())
+			{
+				platform.GET("/stores", d.listPlatformStores)
+				platform.POST("/stores/:id/renew", d.renewPlatformStore)
+				platform.PUT("/stores/:id/status", d.updatePlatformStoreStatus)
+				platform.GET("/stores/:id/payments", d.listPlatformStorePayments)
+			}
 
 			employees := protected.Group("/employees")
 			{

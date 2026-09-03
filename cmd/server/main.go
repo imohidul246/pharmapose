@@ -51,6 +51,7 @@ func main() {
 
 	router := handlers.NewRouter(handlers.Deps{
 		AuthRepo:              authRepo,
+		PlatformRepo:          repository.NewPlatformRepo(pool),
 		PurchaseRequestRepo:   purchaseRequestRepo,
 		StockAuditRequestRepo: stockAuditRequestRepo,
 		CookieOptions:         cookieOptions,

@@ -67,6 +67,7 @@ func TestMain(m *testing.M) {
 
 	testRouter = NewRouter(Deps{
 		AuthRepo:              authRepo,
+		PlatformRepo:          repository.NewPlatformRepo(testPoolDB),
 		PurchaseRequestRepo:   repository.NewPurchaseRequestRepo(testPoolDB),
 		StockAuditRequestRepo: repository.NewStockAuditRequestRepo(testPoolDB),
 		CookieOptions:         auth.CookieOptions{Secure: false},

@@ -3,6 +3,13 @@ import Modal from './Modal'
 import { api } from '../lib/api'
 import { useAuth, isOwner } from '../lib/auth'
 
+function subscriptionDays(iso: string | null | undefined): number | null {
+  if (!iso) return null
+  const t = new Date(iso).getTime()
+  if (Number.isNaN(t)) return null
+  return Math.floor((t - Date.now()) / (24 * 3600 * 1000))
+}
+
 export default function AccountChip() {
   const { session, logout } = useAuth()
   const [open, setOpen] = useState(false)
@@ -14,6 +21,31 @@ export default function AccountChip() {
     ? 'bg-marigold-bg text-marigold-text'
     : 'bg-safe-bg text-safe-text'
 
+  const isAdmin = !!p.is_platform_admin
+  const subStatus = p.subscription_status ?? 'ACTIVE'
+  const days = isAdmin ? null : subscriptionDays(p.subscription_valid_until)
+  // Dot next to the avatar warns at a glance: red when expired/suspended,
+  // amber when ≤ 7 days remain.
+  const subDot =
+    isAdmin || days === null
+      ? null
+      : subStatus === 'SUSPENDED' || days < 0
+        ? 'bg-brick-text'
+        : days <= 7
+          ? 'bg-marigold-text'
+          : 'bg-safe-text'
+  const subLine = isAdmin
+    ? 'Platform admin'
+    : subStatus === 'SUSPENDED'
+      ? 'Store SUSPENDED'
+      : days === null
+        ? 'Subscription: grace'
+        : days < 0
+          ? `Subscription expired ${Math.abs(days)}d ago`
+          : days === 0
+            ? 'Subscription expires today'
+            : `Subscription: ${days}d left`
+
   return (
     <>
       <button
@@ -21,8 +53,14 @@ export default function AccountChip() {
         aria-expanded={open}
         className="flex items-center gap-2 rounded-lg border border-white/15 bg-white/[0.07] py-1 pl-1 pr-2 transition-colors hover:bg-white/15"
       >
-        <span className="flex h-6 w-6 items-center justify-center rounded-md bg-pine-600 font-display text-[11px] font-black text-white">
+        <span className="relative flex h-6 w-6 items-center justify-center rounded-md bg-pine-600 font-display text-[11px] font-black text-white">
           {p.name.trim().charAt(0).toUpperCase()}
+          {subDot && (
+            <span
+              title={subLine}
+              className={`absolute -right-0.5 -top-0.5 h-2 w-2 rounded-full ring-2 ring-pine-950 ${subDot}`}
+            />
+          )}
         </span>
         <span className="hidden text-left text-xs sm:block">
           <span className="block max-w-28 truncate font-semibold leading-tight text-white">
@@ -46,9 +84,34 @@ export default function AccountChip() {
       {open && (
         <>
           <div className="fixed inset-0 z-20" onClick={() => setOpen(false)} aria-hidden />
-          <div className="absolute right-0 top-full z-30 mt-2 w-56 rounded-xl border border-line bg-white p-1.5 text-sm shadow-2xl shadow-pine-950/30">
+          <div className="absolute right-0 top-full z-30 mt-2 w-64 rounded-xl border border-line bg-white p-1.5 text-sm shadow-2xl shadow-pine-950/30">
             <p className="px-2.5 py-1.5 text-[10px] font-bold uppercase tracking-wider text-inksoft">
-              {p.name} · {p.store_id.slice(0, 8)}
+              {p.name} · {p.store_id ? p.store_id.slice(0, 8) : 'platform'}
+            </p>
+            <p
+              className={
+                'mx-2 mb-1 rounded-lg px-2.5 py-1.5 text-xs font-semibold ' +
+                (isAdmin
+                  ? 'bg-mint-50 text-pine-700'
+                  : subStatus === 'SUSPENDED' || (days !== null && days < 0)
+                    ? 'bg-brick-bg text-brick-text'
+                    : days !== null && days <= 7
+                      ? 'bg-marigold-bg text-marigold-text'
+                      : 'bg-safe-bg text-safe-text')
+              }
+            >
+              {subLine}
+              {!isAdmin && p.subscription_valid_until ? (
+                <span className="block font-mono text-[10px] font-normal opacity-80">
+                  valid until{' '}
+                  {(() => {
+                    const d = new Date(p.subscription_valid_until as string)
+                    return Number.isNaN(d.getTime())
+                      ? '—'
+                      : d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })
+                  })()}
+                </span>
+              ) : null}
             </p>
             <button
               onClick={() => {

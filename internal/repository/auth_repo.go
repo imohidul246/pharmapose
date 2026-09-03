@@ -149,8 +149,8 @@ func (r *AuthRepo) Register(ctx context.Context, in RegisterInput, tokenHash, ip
 
 		var storeID string
 		if err := tx.QueryRow(ctx, `
-			INSERT INTO stores (gst_registration_id, business_id, name, address, phone, drug_license_number, drug_license_expiry)
-			VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id::text`,
+			INSERT INTO stores (gst_registration_id, business_id, name, address, phone, drug_license_number, drug_license_expiry, subscription_valid_until, subscription_status)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, now() + interval '30 days', 'ACTIVE') RETURNING id::text`,
 			nullableString(gstRegID), businessID, storeName, storeAddress, storePhone,
 			trimSpaces(in.DrugLicenseNumber), nullableDate(in.DrugLicenseExpiry)).Scan(&storeID); err != nil {
 			return err
@@ -191,9 +191,9 @@ func (r *AuthRepo) FindUserByPhone(ctx context.Context, phone string) (*models.U
 		hash string
 	)
 	err := r.db.QueryRow(ctx,
-		`SELECT id::text, name, phone, is_active, created_at, password_hash
+		`SELECT id::text, name, phone, is_active, COALESCE(is_platform_admin, false), created_at, password_hash
 		 FROM users WHERE phone = $1`, phone).
-		Scan(&u.ID, &u.Name, &u.Phone, &u.IsActive, &u.CreatedAt, &hash)
+		Scan(&u.ID, &u.Name, &u.Phone, &u.IsActive, &u.IsPlatformAdmin, &u.CreatedAt, &hash)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, "", nil
 	}
@@ -230,47 +230,168 @@ func (r *AuthRepo) DeleteSessionsForUser(ctx context.Context, userID string) (in
 // ValidateSession resolves a hashed token to a principal, re-checking that both
 // the user and their membership are still active. A dead or inactive session
 // returns auth.ErrUnauthorized. This is called on every authenticated request.
+//
+// Subscription enforcement: for non-admin users the store's subscription is
+// re-checked on every request. When the store is SUSPENDED or its validity
+// window has passed, the session is deleted and ErrUnauthorized is returned,
+// so expiry takes effect mid-session. Platform admins bypass the membership
+// and subscription checks entirely (they may have no store membership).
 func (r *AuthRepo) ValidateSession(ctx context.Context, tokenHash string) (*auth.Principal, error) {
 	var (
-		p     auth.Principal
-		role  string
-		uAct  bool
-		mAct  bool
-		uID, storeID string
-		name  string
+		uID      string
+		name     string
+		uAct     bool
+		isAdmin  bool
 	)
 	err := r.db.QueryRow(ctx, `
-		SELECT u.id::text, u.name, u.is_active,
-		       m.store_id::text, m.role, m.is_active
+		SELECT u.id::text, u.name, u.is_active, COALESCE(u.is_platform_admin, false)
 		FROM sessions s
 		JOIN users u ON u.id = s.user_id
-		JOIN store_memberships m ON (m.user_id = u.id)
-		WHERE s.token_hash = $1 AND s.expires_at > now()
-		ORDER BY m.created_at DESC
-		LIMIT 1`, tokenHash).
-		Scan(&uID, &name, &uAct, &storeID, &role, &mAct)
+		WHERE s.token_hash = $1 AND s.expires_at > now()`, tokenHash).
+		Scan(&uID, &name, &uAct, &isAdmin)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, auth.ErrUnauthorized
 	}
 	if err != nil {
 		return nil, err
 	}
-	if !uAct || !mAct {
+	if !uAct {
+		_, _ = r.db.Exec(ctx, `DELETE FROM sessions WHERE token_hash = $1`, tokenHash)
+		return nil, auth.ErrUnauthorized
+	}
+	if isAdmin {
+		// Platform admin: attach the latest active membership when one exists
+		// (convenience for UIs) but never require it.
+		var storeID string
+		var role string
+		mErr := r.db.QueryRow(ctx, `
+			SELECT m.store_id::text, m.role
+			FROM store_memberships m
+			WHERE m.user_id = $1 AND m.is_active = true
+			ORDER BY m.created_at DESC
+			LIMIT 1`, uID).Scan(&storeID, &role)
+		if mErr != nil && !errors.Is(mErr, pgx.ErrNoRows) {
+			return nil, mErr
+		}
+		if errors.Is(mErr, pgx.ErrNoRows) {
+			return &auth.Principal{UserID: uID, Name: name, IsPlatformAdmin: true}, nil
+		}
+		return &auth.Principal{UserID: uID, Name: name, StoreID: storeID, Role: auth.Role(role), IsPlatformAdmin: true}, nil
+	}
+
+	var (
+		role    string
+		mAct    bool
+		storeID string
+	)
+	err = r.db.QueryRow(ctx, `
+		SELECT m.store_id::text, m.role, m.is_active
+		FROM store_memberships m
+		WHERE m.user_id = $1
+		ORDER BY m.created_at DESC
+		LIMIT 1`, uID).Scan(&storeID, &role, &mAct)
+	if errors.Is(err, pgx.ErrNoRows) {
+		_, _ = r.db.Exec(ctx, `DELETE FROM sessions WHERE token_hash = $1`, tokenHash)
+		return nil, auth.ErrUnauthorized
+	}
+	if err != nil {
+		return nil, err
+	}
+	if !mAct {
 		// Session row belongs to a deactivated login: kill it so it cannot
 		// silently linger.
 		_, _ = r.db.Exec(ctx, `DELETE FROM sessions WHERE token_hash = $1`, tokenHash)
 		return nil, auth.ErrUnauthorized
 	}
-	p = auth.Principal{UserID: uID, Name: name, StoreID: storeID, Role: auth.Role(role)}
-	return &p, nil
+	// Subscription gate: SUSPENDED or expired validity kills the session.
+	var subStatus *string
+	var subValidUntil *time.Time
+	if err := r.db.QueryRow(ctx, `
+		SELECT subscription_status, subscription_valid_until
+		FROM stores WHERE id = $1`, storeID).Scan(&subStatus, &subValidUntil); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			_, _ = r.db.Exec(ctx, `DELETE FROM sessions WHERE token_hash = $1`, tokenHash)
+			return nil, auth.ErrUnauthorized
+		}
+		return nil, err
+	}
+	status := "ACTIVE"
+	if subStatus != nil && *subStatus != "" {
+		status = *subStatus
+	}
+	if !models.IsSubscriptionActive(status, subValidUntil, time.Now().UTC()) {
+		_, _ = r.db.Exec(ctx, `DELETE FROM sessions WHERE token_hash = $1`, tokenHash)
+		return nil, auth.ErrUnauthorized
+	}
+	return &auth.Principal{UserID: uID, Name: name, StoreID: storeID, Role: auth.Role(role)}, nil
+}
+
+// CheckStoreSubscriptionForUser enforces the login gate: platform admins always
+// pass; every other user passes only when their store subscription is ACTIVE
+// and unexpired. Returns a *models.ValidationError with the user-facing
+// message when the store is expired/suspended, so the handler can surface 403
+// {"error": "subscription_expired", ...}.
+func (r *AuthRepo) CheckStoreSubscriptionForUser(ctx context.Context, user *models.User) error {
+	if user == nil {
+		return errors.New("user is required")
+	}
+	if user.IsPlatformAdmin {
+		return nil
+	}
+	var storeID string
+	err := r.db.QueryRow(ctx, `
+		SELECT m.store_id::text
+		FROM store_memberships m
+		WHERE m.user_id = $1
+		ORDER BY m.created_at DESC
+		LIMIT 1`, user.ID).Scan(&storeID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		// No tenancy yet (should not happen for store users): let the normal
+		// session flow decide.
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var subStatus *string
+	var subValidUntil *time.Time
+	if err := r.db.QueryRow(ctx, `
+		SELECT subscription_status, subscription_valid_until
+		FROM stores WHERE id = $1`, storeID).Scan(&subStatus, &subValidUntil); err != nil {
+		return err
+	}
+	status := "ACTIVE"
+	if subStatus != nil && *subStatus != "" {
+		status = *subStatus
+	}
+	if !models.IsSubscriptionActive(status, subValidUntil, time.Now().UTC()) {
+		return models.NewValidationError("Store subscription has expired. Please contact the administrator.")
+	}
+	return nil
+}
+
+// GetStoreSubscription returns a store's subscription status + validity window.
+func (r *AuthRepo) GetStoreSubscription(ctx context.Context, storeID string) (status string, validUntil *time.Time, err error) {
+	var subStatus *string
+	var subValid *time.Time
+	if err := r.db.QueryRow(ctx, `
+		SELECT subscription_status, subscription_valid_until
+		FROM stores WHERE id = $1`, storeID).Scan(&subStatus, &subValid); err != nil {
+		return "", nil, err
+	}
+	status = "ACTIVE"
+	if subStatus != nil && *subStatus != "" {
+		status = *subStatus
+	}
+	return status, subValid, nil
 }
 
 // GetUser returns a user by id.
 func (r *AuthRepo) GetUser(ctx context.Context, userID string) (*models.User, error) {
 	var u models.User
 	err := r.db.QueryRow(ctx,
-		`SELECT id::text, name, phone, is_active, created_at FROM users WHERE id = $1`, userID).
-		Scan(&u.ID, &u.Name, &u.Phone, &u.IsActive, &u.CreatedAt)
+		`SELECT id::text, name, phone, is_active, COALESCE(is_platform_admin, false), created_at FROM users WHERE id = $1`, userID).
+		Scan(&u.ID, &u.Name, &u.Phone, &u.IsActive, &u.IsPlatformAdmin, &u.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -285,8 +406,8 @@ func (r *AuthRepo) GetUserByPhone(ctx context.Context, phone string) (*models.Us
 	phone = normalizePhone(phone)
 	var u models.User
 	err := r.db.QueryRow(ctx,
-		`SELECT id::text, name, phone, is_active, created_at FROM users WHERE phone = $1`, phone).
-		Scan(&u.ID, &u.Name, &u.Phone, &u.IsActive, &u.CreatedAt)
+		`SELECT id::text, name, phone, is_active, COALESCE(is_platform_admin, false), created_at FROM users WHERE phone = $1`, phone).
+		Scan(&u.ID, &u.Name, &u.Phone, &u.IsActive, &u.IsPlatformAdmin, &u.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -473,10 +594,12 @@ func (r *AuthRepo) getStoreByIDStub(ctx context.Context, storeID string, s *mode
 	var dlExpiry *time.Time
 	err := r.db.QueryRow(ctx, `
 		SELECT id::text, gst_registration_id::text, name, address, phone,
-		       drug_license_number, drug_license_expiry, is_active, max_employees, created_at
+		       drug_license_number, drug_license_expiry, is_active, max_employees, created_at,
+		       subscription_valid_until, COALESCE(subscription_status, 'ACTIVE'), updated_at
 		FROM stores WHERE id = $1`, storeID).
 		Scan(&s.ID, &s.GSTRegistrationID, &s.Name, &s.Address, &s.Phone,
-			&s.DrugLicenseNumber, &dlExpiry, &s.IsActive, &s.MaxEmployees, &s.CreatedAt)
+			&s.DrugLicenseNumber, &dlExpiry, &s.IsActive, &s.MaxEmployees, &s.CreatedAt,
+			&s.SubscriptionValidUntil, &s.SubscriptionStatus, &s.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return fmt.Errorf("store not found")
@@ -486,6 +609,9 @@ func (r *AuthRepo) getStoreByIDStub(ctx context.Context, storeID string, s *mode
 	if dlExpiry != nil {
 		d := models.NewDate(*dlExpiry)
 		s.DrugLicenseExpiry = &d
+	}
+	if s.SubscriptionStatus == "" {
+		s.SubscriptionStatus = "ACTIVE"
 	}
 	return nil
 }
@@ -699,13 +825,18 @@ func (r *AuthRepo) UpdateStoreSettings(ctx context.Context, storeID, name, addre
 		SET name = $2, address = $3, max_employees = $4, updated_at = now()
 		WHERE id = $1
 		RETURNING id::text, gst_registration_id::text, name, address, phone, drug_license_number,
-		          drug_license_expiry, is_active, max_employees, created_at`,
+		          drug_license_expiry, is_active, max_employees, created_at,
+		          subscription_valid_until, COALESCE(subscription_status, 'ACTIVE'), updated_at`,
 		storeID, name, address, maxEmployees).
 		Scan(&s.ID, &s.GSTRegistrationID, &s.Name, &s.Address, &s.Phone,
-			&s.DrugLicenseNumber, &dlExpiry, &s.IsActive, &s.MaxEmployees, &s.CreatedAt)
+			&s.DrugLicenseNumber, &dlExpiry, &s.IsActive, &s.MaxEmployees, &s.CreatedAt,
+			&s.SubscriptionValidUntil, &s.SubscriptionStatus, &s.UpdatedAt)
 	if dlExpiry != nil {
 		d := models.NewDate(*dlExpiry)
 		s.DrugLicenseExpiry = &d
+	}
+	if s.SubscriptionStatus == "" {
+		s.SubscriptionStatus = "ACTIVE"
 	}
 	return &s, err
 }

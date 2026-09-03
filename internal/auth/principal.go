@@ -31,12 +31,14 @@ const (
 // Principal is the resolved identity for an authenticated request: the logged-in
 // user, the store they belong to, and their membership role. Handlers MUST use
 // Principal.StoreID for every store-scoped query and MUST ignore any client
-// supplied store_id.
+// supplied store_id. Platform admins (IsPlatformAdmin) operate above any single
+// tenant and bypass store subscription enforcement.
 type Principal struct {
-	UserID  string `json:"user_id"`
-	Name    string `json:"name"`
-	StoreID string `json:"store_id"`
-	Role    Role   `json:"role"`
+	UserID          string `json:"user_id"`
+	Name            string `json:"name"`
+	StoreID         string `json:"store_id"`
+	Role            Role   `json:"role"`
+	IsPlatformAdmin bool   `json:"is_platform_admin"`
 }
 
 // employeePermissions is the exact capability set granted to an EMPLOYEE.

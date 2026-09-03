@@ -138,6 +138,20 @@ func RequireOwner() gin.HandlerFunc {
 	return RequireRole(RoleStoreOwner)
 }
 
+// RequirePlatformAdmin gates a route to the global super-admin. It must run
+// after RequireAuth (which binds the principal) and rejects every non-admin
+// principal — including store owners — with 403.
+func RequirePlatformAdmin() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		p := PrincipalFromContext(c.Request.Context())
+		if p == nil || !p.IsPlatformAdmin {
+			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": ErrForbidden.Error()})
+			return
+		}
+		c.Next()
+	}
+}
+
 // CSRF: the session cookie is SameSite=Lax, so cross-site POSTs from another
 // origin cannot carry it. An attacker who somehow acquires the cookie still
 // cannot forge a POST without a matching Origin header. In production the API
