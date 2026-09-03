@@ -1,0 +1,196 @@
+@import "tailwindcss";
+
+/* ---------------------------------------------------------------------------
+   Design tokens — "Apothecary counter"
+   Porcelain ground, bottle-green ink (green-cross storefront vernacular),
+   marigold amber for expiry risk, violet reserved strictly for credit.
+--------------------------------------------------------------------------- */
+@theme {
+  --font-sans: "Instrument Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Archivo", "Instrument Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  /* ground + surfaces */
+  --color-porcelain: #f1f4f2;
+  --color-line: #dfe7e0;
+  --color-line-soft: #e9efea;
+
+  /* pine — brand ink and actions */
+  --color-pine-950: #0a231b;
+  --color-pine-900: #103026;
+  --color-pine-800: #154337;
+  --color-pine-700: #1b5745;
+  --color-pine-600: #226953;
+
+  /* mint tints — selection, hover fills */
+  --color-mint-50: #edf4f0;
+  --color-mint-100: #dfebe3;
+  --color-mint-200: #c3d8cb;
+  --color-mint-300: #8fc2a6;
+
+  /* pale pine — quiet borders on light surfaces */
+  --color-pine-300: #9cc2b1;
+  --color-pine-200: #c0d8cd;
+
+  /* text */
+  --color-ink: #182720;
+  --color-inksoft: #5d6d64;
+
+  /* marigold amber — expiry risk */
+  --color-marigold-bg: #fbf0d9;
+  --color-marigold-text: #7a5208;
+  --color-marigold-dot: #e0a52e;
+
+  /* udhaar violet — credit only */
+  --color-udhaar: #554dc6;
+  --color-udhaar-deep: #443ca5;
+  --color-udhaar-bg: #ebe9fb;
+  --color-udhaar-line: #cfcbf3;
+  --color-udhaar-text: #443ca5;
+
+  /* brick red — errors, expired, the stamp */
+  --color-brick: #b3372b;
+  --color-brick-text: #8f2519;
+  --color-brick-bg: #fae3df;
+
+  /* safe / positive */
+  --color-safe-bg: #e1eee5;
+  --color-safe-text: #2a5940;
+
+  /* header lamps on dark band */
+  --color-lamp-ok: #8fd9b2;
+  --color-lamp-warn: #f0c368;
+  --color-lamp-bad: #f2a69b;
+}
+
+@layer base {
+  html {
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  body {
+    background-color: var(--color-porcelain);
+    color: var(--color-ink);
+    font-family: var(--font-sans);
+    font-size: 14px;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-pine-600);
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+
+  ::selection {
+    background-color: var(--color-mint-200);
+  }
+
+  input,
+  select,
+  textarea,
+  button {
+    font-family: inherit;
+  }
+}
+
+@layer components {
+  /* Keycap chip for keyboard hints. */
+  .keycap {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 1.35rem;
+    padding: 0.05rem 0.3rem;
+    border-radius: 0.25rem;
+    border: 1px solid var(--color-line);
+    border-bottom-width: 2px;
+    background: #fff;
+    color: var(--color-inksoft);
+    font-family: var(--font-mono);
+    font-size: 10px;
+    line-height: 1.2;
+  }
+
+  .keycap-dark {
+    border-color: rgba(255, 255, 255, 0.25);
+    background: rgba(255, 255, 255, 0.08);
+    color: rgba(255, 255, 255, 0.75);
+  }
+
+  /* Rubber stamp — used once, when a sale completes. */
+  .stamp {
+    font-family: var(--font-display);
+    font-weight: 900;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--color-brick);
+    border: 2.5px solid var(--color-brick);
+    border-radius: 0.5rem;
+    transform: rotate(-4deg);
+    animation: stamp-in 0.45s cubic-bezier(0.2, 1.4, 0.4, 1) both;
+    mask-image: radial-gradient(circle at 30% 40%, black 92%, transparent 96%);
+  }
+
+  /* Blister strip — perforated track the nav tabs sit in (the signature). */
+  .blister-track {
+    background-image:
+      radial-gradient(circle, rgba(255, 255, 255, 0.22) 1px, transparent 1.6px),
+      radial-gradient(circle, rgba(255, 255, 255, 0.22) 1px, transparent 1.6px);
+    background-size: 12px 3px;
+    background-repeat: repeat-x;
+    background-position: 0 2px, 0 calc(100% - 2px);
+  }
+
+  .page-enter {
+    animation: page-enter 0.28s ease-out both;
+  }
+
+  @keyframes page-enter {
+    from {
+      opacity: 0;
+      transform: translateY(4px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  @keyframes stamp-in {
+    from {
+      opacity: 0;
+      transform: rotate(-14deg) scale(1.6);
+    }
+    to {
+      opacity: 1;
+      transform: rotate(-4deg) scale(1);
+    }
+  }
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  scrollbar-width: none;
+}
+
+@media print {
+  .no-print {
+    display: none !important;
+  }
+  body {
+    background: #fff;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
